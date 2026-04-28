@@ -20,7 +20,7 @@ SNAPSHOT_FILE="$ROOT_DIR/${SNAPSHOT_DIR:-snapshots}/latest.sql.gz"
 [ -f "$SNAPSHOT_FILE" ] \
   || error "Snapshot não encontrado em $SNAPSHOT_FILE. Execute 'make snapshot' primeiro."
 
-PORT=$("$ROOT_DIR/scripts/next_port.sh")
+PORT=$("$ROOT_DIR/scripts/next_port.sh" "$SLOT_NAME")
 DATA_DIR="$ROOT_DIR/data/slots/$SLOT_NAME"
 SLOT_DIR="$ROOT_DIR/docker/slot/$SLOT_NAME"
 SLOT_CNF="$SLOT_DIR/my.cnf"
