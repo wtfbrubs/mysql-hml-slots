@@ -16,9 +16,9 @@ PRD (RDS MySQL / container local)
  ┌──────────────────────────────────────┐
  │  Slots (containers efêmeros)         │
  │                                      │
- │  slot-feat-login  :3310  TTL 8h      │
- │  slot-hotfix-123  :3311  TTL 24h     │
- │  slot-release-v2  :3312  TTL 48h     │
+ │  hml-01  :3310  TTL 24h             │
+ │  hml-02  :3311  TTL 24h             │
+ │  hml-03  :3312  TTL 24h             │
  └──────────────────────────────────────┘
 ```
 
@@ -83,14 +83,15 @@ make snapshot   # apenas gera snapshot do estado atual do base
 ### 4. Criar slots
 
 ```bash
-make create-slot name=feat-login owner=bruno ttl=8
-make create-slot name=hotfix-123 owner=alice ttl=4
+make create-slot name=hml-01 owner=bruno ttl=24
+make create-slot name=hml-02 owner=alice ttl=24
 ```
 
 ### 5. Conectar ao slot
 
 ```bash
-mysql -h 127.0.0.1 -P 3310 -uroot -proot123
+mysql -h 127.0.0.1 -P 3310 -uroot -proot123   # hml-01
+mysql -h 127.0.0.1 -P 3311 -uroot -proot123   # hml-02
 ```
 
 ### 6. Listar slots
@@ -102,8 +103,8 @@ make list
 ```
 SLOT                   OWNER           PORTA  STATUS     CRIADO EM                  EXPIRA EM
 ----                   -----           -----  ------     ---------                  ---------
-feat-login             bruno           3310   running    2026-04-28T10:00:00-03:00  2026-04-28T18:00:00-03:00
-hotfix-123             alice           3311   running    2026-04-28T10:05:00-03:00  2026-04-28T14:05:00-03:00
+hml-01                 bruno           3310   running    2026-04-28T10:00:00-03:00  2026-04-29T10:00:00-03:00
+hml-02                 alice           3311   running    2026-04-28T10:05:00-03:00  2026-04-29T10:05:00-03:00
 ```
 
 ### 7. Destruir slot
@@ -139,9 +140,21 @@ make expire
 
 | Variável | Padrão | Descrição |
 |---|---|---|
-| `name` | *(obrigatório)* | Nome do slot — letras minúsculas, números, `-` e `_` |
+| `name` | *(obrigatório)* | Nome do slot — seguir padrão `hml-NN` (ex: `hml-01`) |
 | `owner` | `unknown` | Responsável pelo slot |
 | `ttl` | `24` | Tempo de vida em horas |
+
+### Padrão de nomenclatura e portas
+
+O padrão adotado é `hml-NN`, onde `NN` é um número sequencial por ambiente/desenvolvedor. A porta é **determinística** — derivada automaticamente do sufixo numérico — garantindo string de conexão fixa independente de destroy e recreate:
+
+| Slot | Porta |
+|---|---|
+| `hml-01` | `3310` |
+| `hml-02` | `3311` |
+| `hml-NN` | `3309 + N` |
+
+Isso permite que cada dev configure sua string de conexão uma única vez e nunca precise alterá-la.
 
 ---
 
@@ -185,7 +198,7 @@ mysql-hml-slots/
 │   ├── destroy_slot.sh     # Destroi slot e limpa dados
 │   ├── expire_slots.sh     # Remove slots com TTL expirado
 │   ├── list_slots.sh       # Lista slots com status
-│   └── next_port.sh        # Descobre próxima porta disponível
+│   └── next_port.sh        # Porta determinística por sufixo (hml-01→3310) ou dinâmica
 ├── registry/
 │   └── slots.json          # Estado dos slots ativos
 ├── snapshots/              # Dumps comprimidos (gerado, ignorado pelo git)
