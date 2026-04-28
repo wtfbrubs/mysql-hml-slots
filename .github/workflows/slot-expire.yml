@@ -8,7 +8,7 @@ on:
 jobs:
   expire:
     name: Expirar slots vencidos
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Configurar credenciais AWS
         uses: aws-actions/configure-aws-credentials@v4

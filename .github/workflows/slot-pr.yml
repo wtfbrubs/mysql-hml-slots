@@ -13,7 +13,7 @@ jobs:
     if: >
       github.event.action == 'labeled' &&
       startsWith(github.event.label.name, 'hml-')
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       pull-requests: write
 
@@ -104,7 +104,7 @@ jobs:
     if: >
       (github.event.action == 'unlabeled' && startsWith(github.event.label.name, 'hml-')) ||
       github.event.action == 'closed'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       pull-requests: write
 
