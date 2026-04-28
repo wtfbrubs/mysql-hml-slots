@@ -47,7 +47,12 @@ trap '_slot_rollback' EXIT
 
 log "Criando slot '$SLOT_NAME' — porta $PORT | owner: $OWNER | TTL: ${TTL}h"
 
-mkdir -p "$DATA_DIR" "$SLOT_DIR"
+mkdir -p "$SLOT_DIR"
+# Cria data dir via Docker para contornar ownership root do volume bind mount
+docker run --rm \
+  -v "$ROOT_DIR/data:/data" \
+  --entrypoint sh "mysql:${MYSQL_VERSION}" \
+  -c "mkdir -p /data/slots/$SLOT_NAME && chown -R 999:999 /data/slots/$SLOT_NAME"
 
 cat > "$SLOT_CNF" << EOF
 [mysqld]

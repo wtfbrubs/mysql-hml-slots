@@ -16,7 +16,14 @@ else
   docker rm -f "$SLOT_NAME" 2>/dev/null || true
 fi
 
-rm -rf "$DATA_DIR" "$SLOT_DIR"
+# DATA_DIR pertence ao uid do MySQL no container — remover via Docker
+if [ -d "$DATA_DIR" ]; then
+  docker run --rm \
+    -v "$ROOT_DIR/data/slots:/data/slots" \
+    --entrypoint sh "mysql:${MYSQL_VERSION}" \
+    -c "rm -rf /data/slots/$SLOT_NAME"
+fi
+rm -rf "$SLOT_DIR"
 
 lock_registry
 TMP=$(mktemp)

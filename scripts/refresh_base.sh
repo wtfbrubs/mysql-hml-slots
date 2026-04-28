@@ -21,8 +21,11 @@ docker compose --env-file "$ROOT_DIR/.env" \
   -f "$ROOT_DIR/docker/base/docker-compose.yml" down 2>/dev/null || true
 
 log "Limpando data/base..."
-rm -rf "$ROOT_DIR/data/base"
-mkdir -p "$ROOT_DIR/data/base"
+# Os arquivos pertencem ao uid do MySQL dentro do container — limpar via Docker
+docker run --rm \
+  -v "$ROOT_DIR/data/base:/var/lib/mysql" \
+  --entrypoint sh "mysql:${MYSQL_VERSION}" \
+  -c "rm -rf /var/lib/mysql/*"
 
 # Sobe base limpo
 log "Subindo mysql-hml-base..."
