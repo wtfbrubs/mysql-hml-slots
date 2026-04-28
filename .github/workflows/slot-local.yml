@@ -32,10 +32,11 @@ jobs:
     name: ${{ inputs.action }} ${{ inputs.slot_name }}
     runs-on: self-hosted
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    defaults:
+      run:
+        working-directory: /home/bruno/repos/mysql-hml-slots
 
+    steps:
       - name: Validar inputs
         run: |
           if [[ "${{ inputs.action }}" =~ ^(create|destroy)$ ]] && \
