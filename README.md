@@ -257,6 +257,44 @@ terraform output -raw github_actions_secret_access_key
 
 ## GitHub Actions
 
+### Slot por PR (fluxo recomendado)
+
+Cada desenvolvedor tem um slot fixo (`hml-01`, `hml-02`, ...). Para subir o ambiente de uma feature:
+
+1. Crie as labels no repositório (uma vez):
+   ```bash
+   make github-labels        # cria hml-01 a hml-10
+   make github-labels n=5    # cria hml-01 a hml-05
+   ```
+
+2. Abra um PR e adicione a label `hml-01` (ou o seu slot):
+
+   ```
+   PR #42 — feat: novo checkout
+   Labels: hml-01
+   ```
+
+3. O workflow cria o slot automaticamente e comenta no PR:
+
+   ```
+   ## Slot HML criado — hml-01
+
+   | Slot    | hml-01              |
+   | Branch  | feat/novo-checkout  |
+   | Host    | hml.suaempresa.com  |
+   | Porta   | 3310                |
+   | Usuário | root                |
+   | TTL     | 72h                 |
+
+   mysql -h hml.suaempresa.com -P 3310 -uroot -p<senha>
+
+   > Remova a label `hml-01` ou feche o PR para destruir o ambiente.
+   ```
+
+4. Ao mergear ou fechar o PR, o slot é destruído automaticamente.
+
+---
+
 ### Gerenciar slots manualmente
 
 `Actions → HML Slots — Gerenciar → Run workflow`

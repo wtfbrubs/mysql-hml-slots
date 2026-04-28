@@ -1,0 +1,165 @@
+name: HML Slots — PR
+
+on:
+  pull_request:
+    types: [labeled, unlabeled, closed]
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # Cria slot quando label hml-NN é adicionada ao PR
+  # ──────────────────────────────────────────────────────────
+  create:
+    name: Criar slot ${{ github.event.label.name }}
+    if: >
+      github.event.action == 'labeled' &&
+      startsWith(github.event.label.name, 'hml-')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    env:
+      SLOT_NAME: ${{ github.event.label.name }}
+      OWNER:     ${{ github.event.pull_request.user.login }}
+
+    steps:
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Criar slot via SSM
+        id: ssm
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.HML_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"cd /opt/mysql-hml-slots && make create-slot name=$SLOT_NAME owner=$OWNER ttl=72\"]" \
+            --comment "pr-${{ github.event.pull_request.number }}-create-$SLOT_NAME" \
+            --query 'Command.CommandId' \
+            --output text)
+          echo "cmd_id=$CMD_ID" >> $GITHUB_OUTPUT
+
+      - name: Aguardar conclusão
+        run: |
+          aws ssm wait command-executed \
+            --command-id "${{ steps.ssm.outputs.cmd_id }}" \
+            --instance-id "${{ secrets.HML_INSTANCE_ID }}"
+
+      - name: Verificar output do comando
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.ssm.outputs.cmd_id }}" \
+            --instance-id "${{ secrets.HML_INSTANCE_ID }}" \
+            --query 'StandardOutputContent' \
+            --output text
+
+      - name: Calcular porta do slot
+        id: port
+        run: |
+          N=$(echo "$SLOT_NAME" | grep -oE '[0-9]+$' | sed 's/^0*//')
+          echo "port=$((3309 + N))" >> $GITHUB_OUTPUT
+
+      - name: Comentar conexão no PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const slot  = process.env.SLOT_NAME;
+            const port  = '${{ steps.port.outputs.port }}';
+            const host  = '${{ secrets.HML_HOST }}';
+            const pr    = context.payload.pull_request.number;
+            const branch = context.payload.pull_request.head.ref;
+
+            await github.rest.issues.createComment({
+              issue_number: pr,
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              body: [
+                `## Slot HML criado — \`${slot}\``,
+                ``,
+                `| | |`,
+                `|---|---|`,
+                `| **Slot**   | \`${slot}\`   |`,
+                `| **Branch** | \`${branch}\` |`,
+                `| **Host**   | \`${host}\`   |`,
+                `| **Porta**  | \`${port}\`   |`,
+                `| **Usuário**| \`root\`       |`,
+                `| **TTL**    | 72h            |`,
+                ``,
+                `**Conectar:**`,
+                `\`\`\`bash`,
+                `mysql -h ${host} -P ${port} -uroot -p<senha>`,
+                `\`\`\``,
+                ``,
+                `> Remova a label \`${slot}\` ou feche o PR para destruir o ambiente.`,
+              ].join('\n')
+            });
+
+  # ──────────────────────────────────────────────────────────
+  # Destroi slot quando label é removida ou PR é fechado
+  # ──────────────────────────────────────────────────────────
+  destroy:
+    name: Destruir slot(s) HML
+    if: >
+      (github.event.action == 'unlabeled' && startsWith(github.event.label.name, 'hml-')) ||
+      github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Resolver slots a destruir
+        id: slots
+        run: |
+          if [[ "${{ github.event.action }}" == "unlabeled" ]]; then
+            echo "names=${{ github.event.label.name }}" >> $GITHUB_OUTPUT
+          else
+            # PR fechado: pegar todas as labels hml-* presentes no PR
+            LABELS_JSON='${{ toJson(github.event.pull_request.labels) }}'
+            NAMES=$(echo "$LABELS_JSON" \
+              | jq -r '[.[] | select(.name | startswith("hml-")) | .name] | join(" ")')
+            echo "names=$NAMES" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Destruir slots via SSM
+        if: steps.slots.outputs.names != ''
+        run: |
+          for SLOT in ${{ steps.slots.outputs.names }}; do
+            CMD_ID=$(aws ssm send-command \
+              --instance-ids "${{ secrets.HML_INSTANCE_ID }}" \
+              --document-name "AWS-RunShellScript" \
+              --parameters "commands=[\"cd /opt/mysql-hml-slots && make destroy-slot name=$SLOT\"]" \
+              --comment "pr-${{ github.event.pull_request.number }}-destroy-$SLOT" \
+              --query 'Command.CommandId' \
+              --output text)
+            aws ssm wait command-executed \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ secrets.HML_INSTANCE_ID }}"
+            echo "Slot $SLOT destruído"
+          done
+
+      - name: Comentar no PR
+        if: steps.slots.outputs.names != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const names  = '${{ steps.slots.outputs.names }}'.trim().split(' ');
+            const reason = '${{ github.event.action }}' === 'closed'
+              ? 'PR fechado/mergeado'
+              : 'label removida';
+            const list = names.map(s => `\`${s}\``).join(', ');
+
+            await github.rest.issues.createComment({
+              issue_number: context.payload.pull_request.number,
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              body: `## Slot HML destruído\n\nAmbientes removidos: ${list}\nMotivo: ${reason}.`
+            });

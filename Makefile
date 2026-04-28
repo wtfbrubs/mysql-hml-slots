@@ -2,7 +2,7 @@ include .env
 export
 
 .PHONY: up-prd down-prd up-base down-base refresh snapshot \
-        create-slot destroy-slot list expire help
+        create-slot destroy-slot list expire github-labels help
 
 up-prd:
 	cd docker/prd && docker compose up -d
@@ -34,6 +34,16 @@ list:
 expire:
 	./scripts/expire_slots.sh
 
+# Cria labels hml-01..hml-NN no repositório GitHub (requer gh CLI autenticado)
+# Uso: make github-labels        → cria hml-01 a hml-10
+#      make github-labels n=5    → cria hml-01 a hml-05
+github-labels:
+	@for i in $$(seq 1 $${n:-10}); do \
+	  LABEL=$$(printf "hml-%02d" $$i); \
+	  gh label create "$$LABEL" --color "0075ca" --description "Slot HML $$i" --force && \
+	  echo "  label criada: $$LABEL" || true; \
+	done
+
 help:
 	@echo ""
 	@echo "  up-prd                                   Sobe MySQL simulado de PRD (local)"
@@ -46,4 +56,5 @@ help:
 	@echo "  destroy-slot name=X                      Destrói slot e limpa dados"
 	@echo "  list                                     Lista slots com status de expiração"
 	@echo "  expire                                   Destrói todos os slots expirados"
+	@echo "  github-labels [n=10]                     Cria labels hml-01..hml-NN no GitHub"
 	@echo ""
