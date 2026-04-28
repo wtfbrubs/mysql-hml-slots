@@ -1,0 +1,18 @@
+services:
+  mysql-base:
+    image: mysql:${MYSQL_VERSION}
+    container_name: mysql-hml-base
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${BASE_MYSQL_ROOT_PASSWORD}
+    ports:
+      - "${BASE_MYSQL_PORT}:3306"
+    volumes:
+      - ../../data/base:/var/lib/mysql
+      - ./my.cnf:/etc/mysql/conf.d/custom.cnf
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s

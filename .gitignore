@@ -1,0 +1,5 @@
+data/
+snapshots/
+docker/slot/*/
+registry/slots.lock
+.DS_Store

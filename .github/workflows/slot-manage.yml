@@ -1,0 +1,91 @@
+name: HML Slots — Gerenciar
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Ação'
+        required: true
+        type: choice
+        options:
+          - create
+          - destroy
+          - list
+          - expire
+          - refresh
+          - snapshot
+      slot_name:
+        description: 'Nome do slot (obrigatório para create/destroy)'
+        required: false
+        default: ''
+      owner:
+        description: 'Owner do slot (para create)'
+        required: false
+        default: 'github-actions'
+      ttl:
+        description: 'TTL em horas (para create, padrão 24)'
+        required: false
+        default: '24'
+
+jobs:
+  manage:
+    name: ${{ inputs.action }} ${{ inputs.slot_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validar inputs
+        run: |
+          if [[ "${{ inputs.action }}" =~ ^(create|destroy)$ ]] && \
+             [[ -z "${{ inputs.slot_name }}" ]]; then
+            echo "::error::slot_name é obrigatório para a ação '${{ inputs.action }}'"
+            exit 1
+          fi
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Montar comando make
+        id: cmd
+        run: |
+          case "${{ inputs.action }}" in
+            create)
+              echo "cmd=make create-slot name=${{ inputs.slot_name }} owner=${{ inputs.owner }} ttl=${{ inputs.ttl }}" >> $GITHUB_OUTPUT
+              ;;
+            destroy)
+              echo "cmd=make destroy-slot name=${{ inputs.slot_name }}" >> $GITHUB_OUTPUT
+              ;;
+            list|expire|refresh|snapshot)
+              echo "cmd=make ${{ inputs.action }}" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Executar no host HML via SSM
+        id: ssm
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.HML_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"cd /opt/mysql-hml-slots && ${{ steps.cmd.outputs.cmd }}\"]" \
+            --comment "gh-actions: ${{ inputs.action }} ${{ inputs.slot_name }}" \
+            --query 'Command.CommandId' \
+            --output text)
+          echo "cmd_id=$CMD_ID" >> $GITHUB_OUTPUT
+          echo "SSM Command ID: $CMD_ID"
+
+      - name: Aguardar conclusão
+        run: |
+          aws ssm wait command-executed \
+            --command-id "${{ steps.ssm.outputs.cmd_id }}" \
+            --instance-id "${{ secrets.HML_INSTANCE_ID }}"
+
+      - name: Exibir output
+        if: always()
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.ssm.outputs.cmd_id }}" \
+            --instance-id "${{ secrets.HML_INSTANCE_ID }}" \
+            --query '[StandardOutputContent, StandardErrorContent]' \
+            --output text

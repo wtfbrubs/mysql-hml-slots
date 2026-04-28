@@ -1,0 +1,22 @@
+aws_region  = "us-east-1"
+project_name = "mysql-hml-slots"
+environment  = "hml"
+
+# Seu IP público para acesso SSH e slots
+allowed_cidr = "203.0.113.10/32"
+
+# RDS PRD
+db_name          = "appdb"
+db_username      = "admin"
+db_password      = "SenhaSegura123!"
+db_instance_class = "db.t3.micro"
+
+# EC2 HML host
+ec2_instance_type = "t3.small"
+ec2_key_name      = "meu-key-pair"
+
+# URL do repositório para clone no host
+repo_url = "https://github.com/sua-org/mysql-hml-slots.git"
+
+# Senha root do MySQL base no host HML
+hml_mysql_root_password = "HmlRootSegura456!"

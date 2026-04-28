@@ -1,0 +1,19 @@
+services:
+  ${SLOT_NAME}:
+    image: mysql:${MYSQL_VERSION}
+    container_name: ${SLOT_NAME}
+    restart: "no"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_INITDB_SKIP_TZINFO: "1"
+    ports:
+      - "${PORT}:3306"
+    volumes:
+      - ${DATA_DIR}:/var/lib/mysql
+      - ${SLOT_CNF}:/etc/mysql/conf.d/custom.cnf
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s

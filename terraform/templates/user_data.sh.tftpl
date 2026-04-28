@@ -1,0 +1,52 @@
+#!/bin/bash
+set -e
+exec > >(tee /var/log/user-data.log) 2>&1
+
+echo "[INFO] Instalando dependências..."
+yum update -y
+yum install -y docker git jq mysql
+
+# Docker Compose plugin
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL \
+  "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+systemctl enable docker
+systemctl start docker
+usermod -aG docker ec2-user
+
+echo "[INFO] Clonando repositório..."
+git clone ${repo_url} /opt/mysql-hml-slots
+chown -R ec2-user:ec2-user /opt/mysql-hml-slots
+
+echo "[INFO] Escrevendo .env para modo cloud (remote)..."
+cat > /opt/mysql-hml-slots/.env << 'ENVEOF'
+BASE_MYSQL_PORT=3306
+BASE_MYSQL_ROOT_PASSWORD=${hml_mysql_root_password}
+MYSQL_VERSION=${mysql_version}
+SLOTS_BASE_PORT=${slots_base_port}
+SNAPSHOT_DIR=snapshots
+
+PRD_MODE=remote
+PRD_HOST=${prd_host}
+PRD_PORT=${prd_port}
+PRD_USER=${prd_user}
+PRD_MYSQL_ROOT_PASSWORD=${prd_password}
+ENVEOF
+
+chown ec2-user:ec2-user /opt/mysql-hml-slots/.env
+chmod 600 /opt/mysql-hml-slots/.env
+
+echo "[INFO] Subindo mysql-hml-base..."
+cd /opt/mysql-hml-slots
+sudo -u ec2-user make up-base
+
+# Cron: expirar slots diariamente à 1h
+cat > /etc/cron.d/mysql-hml-slots << 'CRONEOF'
+0 1 * * * ec2-user cd /opt/mysql-hml-slots && make expire >> /var/log/slot-expire.log 2>&1
+CRONEOF
+chmod 644 /etc/cron.d/mysql-hml-slots
+
+echo "[INFO] Bootstrap concluído"
