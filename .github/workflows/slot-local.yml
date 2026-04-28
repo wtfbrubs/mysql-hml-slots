@@ -1,0 +1,59 @@
+name: HML Slots — Local (sem AWS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Ação'
+        required: true
+        type: choice
+        options:
+          - create
+          - destroy
+          - list
+          - expire
+          - refresh
+          - snapshot
+      slot_name:
+        description: 'Nome do slot (obrigatório para create/destroy)'
+        required: false
+        default: ''
+      owner:
+        description: 'Owner do slot (para create)'
+        required: false
+        default: 'local'
+      ttl:
+        description: 'TTL em horas (para create, padrão 24)'
+        required: false
+        default: '24'
+
+jobs:
+  local:
+    name: ${{ inputs.action }} ${{ inputs.slot_name }}
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validar inputs
+        run: |
+          if [[ "${{ inputs.action }}" =~ ^(create|destroy)$ ]] && \
+             [[ -z "${{ inputs.slot_name }}" ]]; then
+            echo "::error::slot_name é obrigatório para a ação '${{ inputs.action }}'"
+            exit 1
+          fi
+
+      - name: Executar make
+        run: |
+          case "${{ inputs.action }}" in
+            create)
+              make create-slot name=${{ inputs.slot_name }} owner=${{ inputs.owner }} ttl=${{ inputs.ttl }}
+              ;;
+            destroy)
+              make destroy-slot name=${{ inputs.slot_name }}
+              ;;
+            list|expire|refresh|snapshot)
+              make ${{ inputs.action }}
+              ;;
+          esac
