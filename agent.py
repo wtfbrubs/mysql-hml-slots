@@ -118,8 +118,9 @@ def mysql_metrics(container: str, password: str) -> dict | None:
 
 
 def replica_status(container: str, password: str) -> dict | None:
+    # Sem -sN: o formato \G requer saída verbosa para ser parseado corretamente
     out = _run(["docker", "exec", container,
-                "mysql", "-uroot", f"-p{password}", "-sN",
+                "mysql", "-uroot", f"-p{password}",
                 "-e", "SHOW REPLICA STATUS\\G"])
     if not out:
         return None

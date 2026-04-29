@@ -218,6 +218,22 @@ tr:hover td{background:var(--surface-2)}
 .spinner{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
+/* topology */
+.topo{display:flex;align-items:center;gap:0;margin-bottom:14px;overflow-x:auto;padding:2px 0}
+.topo-node{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:140px;flex-shrink:0}
+.topo-node-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:4px}
+.topo-node-name{font-size:13px;font-weight:600;margin-bottom:3px}
+.topo-node-port{font-size:11px;color:var(--muted)}
+.topo-arrow{display:flex;flex-direction:column;align-items:center;padding:0 8px;flex-shrink:0;gap:2px}
+.topo-arrow-line{display:flex;align-items:center;gap:0;width:100%}
+.topo-arrow svg{flex-shrink:0}
+.topo-arrow-label{font-size:10px;color:var(--muted);text-align:center;white-space:nowrap}
+.topo-arrow-meta{font-size:11px;font-weight:600;text-align:center;white-space:nowrap}
+.topo-slots{display:flex;flex-direction:column;gap:6px;flex-shrink:0}
+.topo-slot-node{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 12px;display:flex;align-items:center;gap:10px;min-width:200px}
+.topo-slot-name{font-size:12px;font-weight:600;flex:1}
+.topo-slot-meta{font-size:11px;color:var(--muted)}
+
 .owner-cell{cursor:pointer;white-space:nowrap}
 .owner-cell:hover{color:var(--info)}
 .owner-edit{display:inline-flex;align-items:center;gap:6px}
@@ -323,6 +339,70 @@ function renderRepl(r) {
     </div>`;
 }
 
+function topoArrow(label, meta, metaColor) {
+  return `
+    <div class="topo-arrow">
+      <div class="topo-arrow-label">${label}</div>
+      <div class="topo-arrow-line">
+        <svg width="48" height="2"><line x1="0" y1="1" x2="40" y2="1" stroke="var(--border-2)" stroke-width="1.5"/><polygon points="40,0 48,1 40,2" fill="var(--border-2)"/></svg>
+      </div>
+      ${meta !== null ? `<div class="topo-arrow-meta" style="color:${metaColor}">${meta}</div>` : ''}
+    </div>`;
+}
+
+function renderTopology(d) {
+  const repl   = d.base_repl || {};
+  const slots  = d.slots     || [];
+  const lag    = repl.lag_int;
+  const ioOk   = repl.io_running  === 'Yes';
+  const sqlOk  = repl.sql_running === 'Yes';
+  const replOk = repl.configured && ioOk && sqlOk;
+  const lagColor = lag === null ? 'var(--muted)'
+                 : lag > 60    ? 'var(--danger)'
+                 : lag > 10    ? 'var(--warning)'
+                 : 'var(--accent)';
+  const replLabel = repl.configured
+    ? (replOk ? 'GTID replication' : '<span style="color:var(--danger)">replication error</span>')
+    : '<span style="color:var(--muted)">não configurado</span>';
+  const lagMeta = repl.configured
+    ? (lag !== null ? `lag ${lag}s` : '—')
+    : null;
+
+  const prdBorderColor  = d.prd  === 'running' ? 'var(--accent)' : 'var(--danger)';
+  const baseBorderColor = d.base === 'running' ? (replOk ? 'var(--accent)' : 'var(--warning)') : 'var(--danger)';
+
+  const slotNodes = slots.length
+    ? slots.map(s => {
+        const ok = s.container_status === 'running';
+        const bc = ok ? 'var(--accent)' : 'var(--danger)';
+        return `<div class="topo-slot-node" style="border-color:${bc}">
+          <span class="topo-slot-name">${s.slot_name}</span>
+          <span class="badge b-blue" style="font-size:10px">${s.port}</span>
+          <span class="topo-slot-meta">${s.owner}</span>
+          ${badge(s.container_status)}
+        </div>`;
+      }).join('')
+    : `<div class="topo-slot-node" style="color:var(--muted);font-size:12px;border-style:dashed">nenhum slot ativo</div>`;
+
+  return `<div class="topo">
+    <div class="topo-node" style="border-color:${prdBorderColor}">
+      <div class="topo-node-label">PRD</div>
+      <div class="topo-node-name">${repl.source_host || 'mysql-hml-prd'}</div>
+      <div class="topo-node-port">:${repl.source_port || 3306}</div>
+      <div style="margin-top:6px">${badge(d.prd)}</div>
+    </div>
+    ${topoArrow(replLabel, lagMeta, lagColor)}
+    <div class="topo-node" style="border-color:${baseBorderColor}">
+      <div class="topo-node-label">Base (réplica)</div>
+      <div class="topo-node-name">mysql-hml-base</div>
+      <div class="topo-node-port">:3306</div>
+      <div style="margin-top:6px">${badge(d.base)}</div>
+    </div>
+    ${topoArrow('Clone Plugin', null, '')}
+    <div class="topo-slots">${slotNodes}</div>
+  </div>`;
+}
+
 function renderServer(srv) {
   const d = srv.data;
   const sid = 'srv-' + srv.name.replace(/[^a-z0-9]/gi, '-');
@@ -376,6 +456,7 @@ function renderServer(srv) {
         <button class="btn btn-accent btn-sm" style="margin-left:8px" onclick="event.stopPropagation();doRefresh('${srv.url}','${srv.name}')"><i class="ph ph-arrows-clockwise"></i> Voltar Base</button>
       </div>
       <div class="server-body" id="${sid}-body">
+        ${renderTopology(d)}
         ${renderRepl(d.base_repl)}
         <div class="table-wrap">
           <table>
