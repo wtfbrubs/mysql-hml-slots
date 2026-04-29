@@ -2,7 +2,9 @@ include .env
 export
 
 .PHONY: up-prd down-prd up-base down-base refresh snapshot \
-        create-slot destroy-slot list expire github-labels help
+        create-slot destroy-slot list expire \
+        setup-replication replication-status \
+        github-labels dashboard help
 
 up-prd:
 	cd docker/prd && docker compose up -d
@@ -37,6 +39,16 @@ expire:
 # Cria labels hml-01..hml-NN no repositório GitHub (requer gh CLI autenticado)
 # Uso: make github-labels        → cria hml-01 a hml-10
 #      make github-labels n=5    → cria hml-01 a hml-05
+setup-replication:
+	./scripts/setup_replication.sh
+
+replication-status:
+	@docker exec mysql-hml-base mysql -uroot -p"$$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/null -e "SHOW REPLICA STATUS\G" | \
+	  grep -E "(Replica_IO_Running|Replica_SQL_Running|Seconds_Behind|Last_Error|Source_Host|Source_Port)"
+
+dashboard:
+	python3 dashboard.py
+
 github-labels:
 	@for i in $$(seq 1 $${n:-10}); do \
 	  LABEL=$$(printf "hml-%02d" $$i); \

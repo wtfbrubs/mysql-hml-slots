@@ -10,9 +10,16 @@ services:
     volumes:
       - ../../data/prd:/var/lib/mysql
       - ./my.cnf:/etc/mysql/conf.d/custom.cnf
+    networks:
+      - mysql-hml
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
       interval: 5s
       timeout: 5s
       retries: 12
       start_period: 30s
+
+networks:
+  mysql-hml:
+    name: mysql-hml
+    driver: bridge

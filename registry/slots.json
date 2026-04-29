@@ -1,1 +1,29 @@
-[]
+[
+  {
+    "slot_name": "hml-02",
+    "owner": "local",
+    "port": 3311,
+    "status": "running",
+    "created_at": "2026-04-28T23:09:34-03:00",
+    "expires_at": "2026-04-29T23:09:34-03:00",
+    "compose_dir": "/home/bruno/repos/mysql-hml-slots/docker/slot/hml-02"
+  },
+  {
+    "slot_name": "hml-03",
+    "owner": "joão",
+    "port": 3312,
+    "status": "running",
+    "created_at": "2026-04-28T23:10:40-03:00",
+    "expires_at": "2026-04-29T23:10:40-03:00",
+    "compose_dir": "/home/bruno/repos/mysql-hml-slots/docker/slot/hml-03"
+  },
+  {
+    "slot_name": "hml-01-bruno",
+    "owner": "local",
+    "port": 3310,
+    "status": "running",
+    "created_at": "2026-04-28T23:12:33-03:00",
+    "expires_at": "2026-04-29T23:12:33-03:00",
+    "compose_dir": "/home/bruno/repos/mysql-hml-slots/docker/slot/hml-01-bruno"
+  }
+]
