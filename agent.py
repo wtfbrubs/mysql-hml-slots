@@ -372,6 +372,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {"ok": False, "error": str(e)})
 
+        elif path == "/action/create-slot":
+            name  = body.get("name", "").strip()
+            owner = body.get("owner", "bruno").strip()
+            ttl   = str(body.get("ttl", 24))
+            if not name:
+                self.send_json(400, {"error": "name é obrigatório"})
+                return
+            job_id = start_job(
+                f"criar slot {name}",
+                ["bash", str(ROOT / "scripts" / "create_slot.sh"), name, owner, ttl],
+            )
+            self.send_json(200, {"job_id": job_id})
+
+        elif path == "/action/destroy-slot":
+            name = body.get("name", "").strip()
+            if not name:
+                self.send_json(400, {"error": "name é obrigatório"})
+                return
+            job_id = start_job(
+                f"destruir slot {name}",
+                ["bash", str(ROOT / "scripts" / "destroy_slot.sh"), name],
+            )
+            self.send_json(200, {"job_id": job_id})
+
         else:
             self.send_json(404, {"error": "not found"})
 

@@ -261,6 +261,18 @@ tr:hover td{background:var(--surface-2)}
 .owner-edit{display:inline-flex;align-items:center;gap:6px}
 .owner-input{background:var(--surface-2);border:1px solid var(--info);border-radius:var(--radius-sm);color:var(--text);font-family:inherit;font-size:13px;padding:2px 7px;width:110px;outline:none}
 .owner-input:focus{box-shadow:0 0 0 2px rgba(96,165,250,.2)}
+
+#slot-modal{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;display:none;align-items:center;justify-content:center}
+#slot-modal.open{display:flex}
+#slot-panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);width:100%;max-width:420px;padding:24px}
+#slot-panel h3{font-size:15px;font-weight:600;margin-bottom:20px}
+.form-row{margin-bottom:14px}
+.form-row label{display:block;font-size:12px;font-weight:500;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em}
+.form-input{width:100%;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:inherit;font-size:13px;padding:7px 10px;outline:none}
+.form-input:focus{border-color:var(--info);box-shadow:0 0 0 2px rgba(96,165,250,.15)}
+.form-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+.btn-danger{background:var(--danger-dim);border-color:rgba(248,113,113,.25);color:var(--danger)}
+.btn-danger:hover:not(:disabled){background:rgba(248,113,113,.18)}
 </style>
 </head>
 <body>
@@ -303,6 +315,31 @@ tr:hover td{background:var(--surface-2)}
       <button id="log-close" onclick="closeLog()">✕</button>
     </div>
     <div id="log-body"><pre id="log-pre"></pre></div>
+  </div>
+</div>
+
+<div id="slot-modal" onclick="if(event.target===this)closeSlotModal()">
+  <div id="slot-panel">
+    <h3>Criar Slot</h3>
+    <div class="form-row">
+      <label>Nome</label>
+      <input class="form-input" id="slot-name" placeholder="hml-03" maxlength="30"
+             onkeydown="if(event.key==='Enter')document.getElementById('slot-owner').focus()">
+    </div>
+    <div class="form-row">
+      <label>Owner</label>
+      <input class="form-input" id="slot-owner" placeholder="bruno" maxlength="40"
+             onkeydown="if(event.key==='Enter')document.getElementById('slot-ttl').focus()">
+    </div>
+    <div class="form-row">
+      <label>TTL (horas)</label>
+      <input class="form-input" id="slot-ttl" type="number" value="24" min="1" max="720"
+             onkeydown="if(event.key==='Enter')submitCreateSlot()">
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeSlotModal()">Cancelar</button>
+      <button class="btn btn-accent" id="slot-submit" onclick="submitCreateSlot()">Criar</button>
+    </div>
   </div>
 </div>
 
@@ -460,6 +497,7 @@ function renderServer(srv) {
         <div class="actions">
           <button class="btn btn-sm" onclick="doLogs('${srv.url}','${s.slot_name}')">⬛ Logs</button>
           <button class="btn btn-warning btn-sm" onclick="doRestart('${srv.url}','${s.slot_name}',this)">↻ Restart</button>
+          <button class="btn btn-danger btn-sm" onclick="doDestroy('${srv.url}','${s.slot_name}')">✕ Destruir</button>
         </div>
       </td>
     </tr>`;
@@ -476,6 +514,7 @@ function renderServer(srv) {
         <span style="font-size:12px;color:var(--muted)">${snap?'snapshot '+snap.modified+' · '+snap.size_mb+'MB':''}</span>
         <span style="font-size:12px;color:var(--muted)">${srv.latency_ms!==null?srv.latency_ms+'ms':''}</span>
         <button class="btn btn-accent btn-sm" style="margin-left:8px" onclick="event.stopPropagation();doRefresh('${srv.url}','${srv.name}')">↻ Voltar Base</button>
+        <button class="btn btn-sm" style="margin-left:4px" onclick="event.stopPropagation();openSlotModal('${srv.url}')">+ Criar Slot</button>
       </div>
       <div class="server-body" id="${sid}-body">
         ${renderTopology(d)}
@@ -619,6 +658,53 @@ function closeLog(e) {
     document.getElementById('log-modal').classList.remove('open');
 }
 
+// ── create / destroy slot ─────────────────────────────────────────────────────
+
+let _createAgentUrl = null;
+
+function openSlotModal(agentUrl) {
+  _createAgentUrl = agentUrl;
+  document.getElementById('slot-name').value  = '';
+  document.getElementById('slot-owner').value = '';
+  document.getElementById('slot-ttl').value   = '24';
+  document.getElementById('slot-submit').disabled = false;
+  document.getElementById('slot-modal').classList.add('open');
+  setTimeout(() => document.getElementById('slot-name').focus(), 50);
+}
+
+function closeSlotModal() {
+  document.getElementById('slot-modal').classList.remove('open');
+}
+
+async function submitCreateSlot() {
+  const name  = document.getElementById('slot-name').value.trim();
+  const owner = document.getElementById('slot-owner').value.trim() || 'bruno';
+  const ttl   = parseInt(document.getElementById('slot-ttl').value) || 24;
+  if (!name) { document.getElementById('slot-name').focus(); return; }
+  document.getElementById('slot-submit').disabled = true;
+  closeSlotModal();
+  showToast(`+ Criando slot ${name}`);
+  const r = await fetch(`/action/create-slot?agent=${encodeURIComponent(_createAgentUrl)}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, owner, ttl}),
+  });
+  const d = await r.json();
+  pollJob(_createAgentUrl, d.job_id);
+}
+
+async function doDestroy(agentUrl, slot) {
+  if (!confirm(`Destruir o slot "${slot}"?\n\nEssa ação é irreversível.`)) return;
+  showToast(`✕ Destruindo slot ${slot}`);
+  const r = await fetch(`/action/destroy-slot?agent=${encodeURIComponent(agentUrl)}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: slot}),
+  });
+  const d = await r.json();
+  pollJob(agentUrl, d.job_id);
+}
+
 // ── owner inline edit ─────────────────────────────────────────────────────────
 
 function editOwner(span, agentUrl, slot, currentOwner) {
@@ -753,6 +839,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             code, resp = proxy(url, "/action/restart", "POST", body)
         elif path == "/action/set-owner":
             code, resp = proxy(url, "/action/set-owner", "POST", body)
+        elif path == "/action/create-slot":
+            code, resp = proxy(url, "/action/create-slot", "POST", body)
+        elif path == "/action/destroy-slot":
+            code, resp = proxy(url, "/action/destroy-slot", "POST", body)
         else:
             self.send_json(404, {"error": "not found"})
             return
