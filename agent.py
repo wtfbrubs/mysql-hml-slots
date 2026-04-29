@@ -229,19 +229,34 @@ def get_data() -> dict:
     for t in threads:
         t.join()
 
-    base_st = docker_status("mysql-hml-base")
-    prd_st  = docker_status("mysql-hml-prd")
-    base_repl_raw = replica_status("mysql-hml-base", password) if base_st == "running" else None
-    base_repl = base_repl_raw if base_repl_raw else {"configured": False}
+    infra: dict = {}
+
+    def _collect_infra():
+        base_st = docker_status("mysql-hml-base")
+        prd_st  = docker_status("mysql-hml-prd")
+        base_repl_raw = replica_status("mysql-hml-base", password) if base_st == "running" else None
+        infra.update({
+            "base":       base_st,
+            "prd":        prd_st,
+            "base_stats": docker_stats("mysql-hml-base") if base_st == "running" else None,
+            "prd_stats":  docker_stats("mysql-hml-prd")  if prd_st  == "running" else None,
+            "base_repl":  base_repl_raw if base_repl_raw else {"configured": False},
+        })
+
+    infra_thread = threading.Thread(target=_collect_infra)
+    infra_thread.start()
+    for t in threads:
+        t.join()
+    infra_thread.join()
 
     return {
         "server":      SERVER_NAME,
         "slots":       results,
-        "base":        base_st,
-        "prd":         prd_st,
-        "base_stats":  docker_stats("mysql-hml-base") if base_st == "running" else None,
-        "prd_stats":   docker_stats("mysql-hml-prd")  if prd_st  == "running" else None,
-        "base_repl":   base_repl,
+        "base":        infra.get("base", "not found"),
+        "prd":         infra.get("prd",  "not found"),
+        "base_stats":  infra.get("base_stats"),
+        "prd_stats":   infra.get("prd_stats"),
+        "base_repl":   infra.get("base_repl", {"configured": False}),
         "snapshot":    snapshot_info(),
         "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -253,14 +268,17 @@ _cache: dict = {"data": None, "lock": threading.Lock()}
 
 
 def _background_refresh():
+    import time as _time
     while True:
+        t0 = _time.time()
         try:
             data = get_data()
             with _cache["lock"]:
                 _cache["data"] = data
         except Exception:
             pass
-        threading.Event().wait(REFRESH_INTERVAL)
+        elapsed = _time.time() - t0
+        _time.sleep(max(1, REFRESH_INTERVAL - elapsed))
 
 
 def get_cached() -> dict:

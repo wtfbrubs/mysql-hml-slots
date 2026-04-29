@@ -140,7 +140,7 @@ PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HML Central</title>
+<title>Dashboard - Monitor</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -294,7 +294,7 @@ main{padding:24px;max-width:1600px;margin:0 auto}
 <body>
 
 <nav>
-  <span class="nav-brand">HML Central</span>
+  <span class="nav-brand">Dashboard · Monitor</span>
   <div class="nav-right">
     <span class="ts" id="age"></span>
     <span class="ts" id="clock"></span>
@@ -620,6 +620,7 @@ function toggleServer(sid) {
 
 let _lastLoad = null;
 let _loading   = false;
+const POLL_MS  = 5000;
 
 async function load() {
   if (_loading) return;
@@ -637,8 +638,16 @@ async function load() {
   }
 }
 
-setInterval(load, 10000);
-load();
+async function pollLoop() {
+  while (true) {
+    const t0 = Date.now();
+    await load();
+    const elapsed = Date.now() - t0;
+    await new Promise(r => setTimeout(r, Math.max(500, POLL_MS - elapsed)));
+  }
+}
+
+pollLoop();
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') load();
