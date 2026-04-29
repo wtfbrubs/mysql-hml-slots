@@ -82,15 +82,29 @@ if [ "$CLONE_AVAILABLE" = "true" ]; then
 
   START_TS=$(date +%s)
 
+  SLOT_CLONE_STATUS=$(docker exec "$SLOT_NAME" mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -sN 2>/dev/null \
+    -e "SELECT PLUGIN_STATUS FROM information_schema.PLUGINS WHERE PLUGIN_NAME='clone';" 2>/dev/null || echo "")
+  if [ "$SLOT_CLONE_STATUS" != "ACTIVE" ]; then
+    docker exec "$SLOT_NAME" mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null \
+      -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
+  fi
+  # clone_valid_donor_list é obrigatório no recipient a partir do MySQL 8.0
+  docker exec "$SLOT_NAME" mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null \
+    -e "SET GLOBAL clone_valid_donor_list = 'mysql-hml-base:3306';"
+  # Em Docker, MySQL encerra o processo ao fim do clone (não tem supervisor).
+  # O exit code 1 (ERROR 3707) é esperado — os dados já foram copiados.
   docker exec "$SLOT_NAME" mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null -e "
-    INSTALL PLUGIN IF NOT EXISTS clone SONAME 'mysql_clone.so';
     CLONE INSTANCE FROM '${CLONE_USER}'@'mysql-hml-base':3306
       IDENTIFIED BY '${CLONE_PASSWORD}';
-  "
+  " || true
 
-  # Clone reinicia MySQL automaticamente — aguarda voltar
-  log "Clone concluído — aguardando MySQL reiniciar no slot..."
-  sleep 5
+  # Aguarda container parar (MySQL se desliga após clonar) e reinicia
+  log "Clone concluído — reiniciando container do slot..."
+  for _ in $(seq 1 15); do
+    [ "$(docker inspect -f '{{.State.Running}}' "$SLOT_NAME" 2>/dev/null)" = "false" ] && break
+    sleep 1
+  done
+  docker start "$SLOT_NAME"
   wait_for_mysql "$SLOT_NAME" "$MYSQL_ROOT_PASSWORD"
 
   # Desconecta o slot da replicação herdada do base

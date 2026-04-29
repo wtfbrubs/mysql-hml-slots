@@ -80,7 +80,7 @@ _prd_mysql() {
 
 _prd_mysql -e "
   CREATE USER IF NOT EXISTS '${REPLICATION_USER}'@'%'
-    IDENTIFIED WITH mysql_native_password BY '${REPLICATION_PASSWORD}';
+    IDENTIFIED BY '${REPLICATION_PASSWORD}';
   GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${REPLICATION_USER}'@'%';
   FLUSH PRIVILEGES;
 "
@@ -90,10 +90,15 @@ log "Usuário de replicação criado/verificado no PRD"
 # ── Clone Plugin + usuário clone no base ──────────────────────────────────────
 
 log "Instalando Clone Plugin no base..."
+CLONE_STATUS=$(docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" -sN 2>/dev/null \
+  -e "SELECT PLUGIN_STATUS FROM information_schema.PLUGINS WHERE PLUGIN_NAME='clone';" 2>/dev/null || echo "")
+if [ "$CLONE_STATUS" != "ACTIVE" ]; then
+  docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/null \
+    -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
+fi
 docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/null -e "
-  INSTALL PLUGIN IF NOT EXISTS clone SONAME 'mysql_clone.so';
   CREATE USER IF NOT EXISTS '${CLONE_USER}'@'%'
-    IDENTIFIED WITH mysql_native_password BY '${CLONE_PASSWORD}';
+    IDENTIFIED BY '${CLONE_PASSWORD}';
   GRANT BACKUP_ADMIN ON *.* TO '${CLONE_USER}'@'%';
   FLUSH PRIVILEGES;
 "
@@ -170,7 +175,12 @@ fi
 log "Configurando canal de replicação PRD → base..."
 
 SOURCE_SSL_CLAUSE=""
-[ "$PRD_SSL" = "true" ] && SOURCE_SSL_CLAUSE="SOURCE_SSL=1,"
+if [ "$PRD_SSL" = "true" ]; then
+  SOURCE_SSL_CLAUSE="SOURCE_SSL=1,"
+else
+  # caching_sha2_password requer troca de chave RSA sem SSL
+  SOURCE_SSL_CLAUSE="GET_SOURCE_PUBLIC_KEY=1,"
+fi
 
 docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/null -e "
   STOP REPLICA;
@@ -190,9 +200,9 @@ docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/nul
 
 log "Aguardando replicação iniciar..."
 for i in $(seq 1 30); do
-  IO=$(docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" -sN 2>/dev/null \
+  IO=$(docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/null \
     -e "SHOW REPLICA STATUS\G" | grep "Replica_IO_Running" | awk '{print $2}')
-  SQL=$(docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" -sN 2>/dev/null \
+  SQL=$(docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/null \
     -e "SHOW REPLICA STATUS\G" | grep "Replica_SQL_Running:" | awk '{print $2}')
 
   if [ "$IO" = "Yes" ] && [ "$SQL" = "Yes" ]; then
@@ -203,7 +213,7 @@ for i in $(seq 1 30); do
 done
 
 if [ "$IO" != "Yes" ] || [ "$SQL" != "Yes" ]; then
-  ERROR=$(docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" -sN 2>/dev/null \
+  ERROR=$(docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/null \
     -e "SHOW REPLICA STATUS\G" | grep "Last_Error" | head -2)
   error "Replicação não iniciou. IO=$IO SQL=$SQL\n$ERROR"
 fi
