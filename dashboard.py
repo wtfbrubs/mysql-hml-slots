@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 PORT = int(os.environ.get("DASHBOARD_PORT", sys.argv[1] if len(sys.argv) > 1 else 8080))
-REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL", 15))
+REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL", 10))
 AGENT_TIMEOUT    = int(os.environ.get("AGENT_TIMEOUT", 5))
 
 
@@ -296,8 +296,11 @@ main{padding:24px;max-width:1600px;margin:0 auto}
 <nav>
   <span class="nav-brand">HML Central</span>
   <div class="nav-right">
+    <span class="ts" id="age"></span>
     <span class="ts" id="clock"></span>
-    <span class="ts" id="ts"></span>
+    <button class="btn btn-sm" id="refresh-btn" onclick="load()" style="padding:3px 9px;font-size:12px" title="Atualizar agora">
+      <i class="ph ph-arrows-clockwise" id="refresh-icon"></i>
+    </button>
   </div>
 </nav>
 
@@ -616,20 +619,41 @@ function toggleServer(sid) {
   body.classList.toggle('hidden');
 }
 
+let _lastLoad = null;
+let _loading   = false;
+
 async function load() {
+  if (_loading) return;
+  _loading = true;
+  const icon = document.getElementById('refresh-icon');
+  if (icon) icon.style.animation = 'spin .7s linear infinite';
   try {
     const r = await fetch('/api');
     render(await r.json());
+    _lastLoad = Date.now();
   } catch(e) { console.error(e); }
+  finally {
+    _loading = false;
+    if (icon) icon.style.animation = '';
+  }
 }
 
-setInterval(load, 30000);
+setInterval(load, 10000);
 load();
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') load();
+});
 
 function updateClock() {
   const now = new Date(), pad = n => String(n).padStart(2,'0');
   const el = document.getElementById('clock');
   if (el) el.textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  const age = document.getElementById('age');
+  if (age && _lastLoad) {
+    const s = Math.round((Date.now() - _lastLoad) / 1000);
+    age.textContent = s < 5 ? 'agora' : `há ${s}s`;
+  }
 }
 updateClock(); setInterval(updateClock, 1000);
 
