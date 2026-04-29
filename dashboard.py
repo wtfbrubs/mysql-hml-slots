@@ -217,6 +217,12 @@ tr:hover td{background:var(--surface-2)}
 
 .spinner{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+
+.owner-cell{cursor:pointer;white-space:nowrap}
+.owner-cell:hover{color:var(--info)}
+.owner-edit{display:inline-flex;align-items:center;gap:6px}
+.owner-input{background:var(--surface-2);border:1px solid var(--info);border-radius:var(--radius-sm);color:var(--text);font-family:inherit;font-size:13px;padding:2px 7px;width:110px;outline:none}
+.owner-input:focus{box-shadow:0 0 0 2px rgba(96,165,250,.2)}
 </style>
 </head>
 <body>
@@ -268,9 +274,14 @@ const badge = (st) => {
   return `<span class="badge ${map[st]||'b-gray'}">${st}</span>`;
 };
 
-const statsHtml = (s) => s
-  ? `<span style="font-size:12px"><b>${s.cpu}</b> &nbsp;${s.mem}</span>`
-  : '<span class="none">—</span>';
+const statsHtml = (s, m) => {
+  if (!s) return '<span class="none">—</span>';
+  const conn = m?.Threads_connected ?? null;
+  const connHtml = conn !== null
+    ? ` &nbsp;<span style="color:var(--muted)">${conn} conn</span>`
+    : '';
+  return `<span style="font-size:12px"><b>${s.cpu}</b> &nbsp;${s.mem}${connHtml}</span>`;
+};
 
 const metricsHtml = (m) => {
   if (!m) return '<span class="none">—</span>';
@@ -334,12 +345,13 @@ function renderServer(srv) {
   const rows = slots.length ? slots.map(s => {
     const expStr = s.expires_at.slice(0,19).replace('T',' ');
     const remColor = s.alert==='expired'||s.alert==='critical' ? 'var(--danger)' : s.alert==='warning' ? 'var(--warning)' : 'var(--accent)';
+    const ownerSafe = s.owner.replace(/'/g,"\\'");
     return `<tr class="alert-${s.alert}">
       <td><strong>${s.slot_name}</strong></td>
-      <td>${s.owner}</td>
+      <td><span class="owner-cell" onclick="editOwner(this,'${srv.url}','${s.slot_name}','${ownerSafe}')">${s.owner} <i class="ph ph-pencil-simple" style="opacity:.35;font-size:11px;vertical-align:middle"></i></span></td>
       <td><span class="badge b-blue">${s.port}</span></td>
       <td>${badge(s.container_status)}</td>
-      <td>${statsHtml(s.stats)}</td>
+      <td>${statsHtml(s.stats, s.metrics)}</td>
       <td><span style="font-size:12px;color:var(--muted)">${expStr}</span><br><span style="color:${remColor};font-weight:700;font-size:12px">${s.remaining}</span></td>
       <td>${replCellHtml(s.replica)}</td>
       <td>
@@ -503,6 +515,43 @@ function closeLog(e) {
   if (!e || e.target===document.getElementById('log-modal') || e.currentTarget===document.getElementById('log-close'))
     document.getElementById('log-modal').classList.remove('open');
 }
+
+// ── owner inline edit ─────────────────────────────────────────────────────────
+
+function editOwner(span, agentUrl, slot, currentOwner) {
+  span.outerHTML = `
+    <span class="owner-edit" id="owner-edit-${slot}">
+      <input class="owner-input" id="owner-input-${slot}" value="${currentOwner}" maxlength="40"
+             onkeydown="ownerKey(event,'${agentUrl}','${slot}')"
+             onfocus="this.select()">
+      <button class="btn btn-sm" style="padding:2px 7px" onclick="saveOwner('${agentUrl}','${slot}')">✓</button>
+      <button class="btn btn-sm" style="padding:2px 7px" onclick="load()">✕</button>
+    </span>`;
+  const input = document.getElementById('owner-input-' + slot);
+  if (input) { input.focus(); input.select(); }
+}
+
+function ownerKey(e, agentUrl, slot) {
+  if (e.key === 'Enter')  saveOwner(agentUrl, slot);
+  if (e.key === 'Escape') load();
+}
+
+async function saveOwner(agentUrl, slot) {
+  const input = document.getElementById('owner-input-' + slot);
+  const newOwner = input ? input.value.trim() : '';
+  if (!newOwner) return;
+  input.disabled = true;
+  try {
+    const r = await fetch(`/action/set-owner?agent=${encodeURIComponent(agentUrl)}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({slot, owner: newOwner}),
+    });
+    if (!r.ok) console.error('set-owner error', await r.text());
+  } finally {
+    load();
+  }
+}
 </script>
 </body>
 </html>"""
@@ -594,6 +643,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             code, resp = proxy(url, "/action/refresh", "POST", body or b"{}")
         elif path == "/action/restart":
             code, resp = proxy(url, "/action/restart", "POST", body)
+        elif path == "/action/set-owner":
+            code, resp = proxy(url, "/action/set-owner", "POST", body)
         else:
             self.send_json(404, {"error": "not found"})
             return

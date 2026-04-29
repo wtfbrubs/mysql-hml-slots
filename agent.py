@@ -317,6 +317,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {"ok": False, "error": str(e)})
 
+        elif path == "/action/set-owner":
+            import fcntl
+            slot      = body.get("slot", "").strip()
+            new_owner = body.get("owner", "").strip()
+            if not slot or not new_owner:
+                self.send_json(400, {"error": "slot e owner são obrigatórios"})
+                return
+            registry_file = ROOT / "registry" / "slots.json"
+            lock_file     = ROOT / "registry" / "slots.lock"
+            try:
+                with open(lock_file, "w") as lf:
+                    fcntl.flock(lf, fcntl.LOCK_EX)
+                    slots = json.loads(registry_file.read_text())
+                    updated = next((s for s in slots if s["slot_name"] == slot), None)
+                    if not updated:
+                        fcntl.flock(lf, fcntl.LOCK_UN)
+                        self.send_json(404, {"error": f"slot '{slot}' não encontrado"})
+                        return
+                    updated["owner"] = new_owner
+                    registry_file.write_text(
+                        json.dumps(slots, indent=2, ensure_ascii=False) + "\n"
+                    )
+                    fcntl.flock(lf, fcntl.LOCK_UN)
+                self.send_json(200, {"ok": True})
+            except Exception as e:
+                self.send_json(500, {"ok": False, "error": str(e)})
+
         else:
             self.send_json(404, {"error": "not found"})
 
