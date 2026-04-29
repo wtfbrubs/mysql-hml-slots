@@ -186,12 +186,20 @@ main{padding:24px;max-width:1600px;margin:0 auto}
 .repl-card-label{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:6px}
 .repl-card-value{font-size:1.1rem;font-weight:700}
 
-.table-wrap{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--border)}
-table{width:100%;border-collapse:collapse;background:var(--surface);min-width:860px}
-th{text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg);white-space:nowrap}
-td{padding:11px 14px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
-tr:last-child td{border-bottom:none}
-tr:hover td{background:var(--surface-2)}
+.slot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-top:4px}
+.slot-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s,box-shadow .15s}
+.slot-card:hover{border-color:var(--border-2);box-shadow:0 4px 20px rgba(0,0,0,.4)}
+.slot-card.alert-critical{border-color:rgba(248,113,113,.4)}
+.slot-card.alert-warning{border-color:rgba(251,191,36,.35)}
+.slot-card.alert-expired{opacity:.5}
+.slot-card-header{display:flex;align-items:center;gap:8px}
+.slot-card-name{font-weight:700;font-size:14px;flex:1}
+.slot-card-body{display:flex;flex-direction:column;gap:6px}
+.slot-card-row{display:flex;align-items:center;justify-content:space-between;font-size:12px}
+.slot-card-row-label{color:var(--muted);font-weight:500}
+.slot-card-ttl{font-size:13px;font-weight:700;text-align:right}
+.slot-card-actions{display:flex;gap:5px;flex-wrap:wrap;padding-top:4px;border-top:1px solid var(--border)}
+.slot-empty{color:var(--muted);font-size:13px;padding:16px 4px;font-style:italic}
 
 .badge{display:inline-block;padding:2px 8px;border-radius:var(--radius-sm);font-size:11px;font-weight:600;white-space:nowrap}
 .b-green{background:var(--accent-dim);color:var(--accent);border:1px solid rgba(74,222,128,.2)}
@@ -481,27 +489,43 @@ function renderServer(srv) {
   const slots = d.slots || [];
   const snap  = d.snapshot;
 
-  const rows = slots.length ? slots.map(s => {
-    const expStr = s.expires_at.slice(0,19).replace('T',' ');
+  const cards = slots.length ? slots.map(s => {
     const remColor = s.alert==='expired'||s.alert==='critical' ? 'var(--danger)' : s.alert==='warning' ? 'var(--warning)' : 'var(--accent)';
     const ownerSafe = s.owner.replace(/'/g,"\\'");
-    return `<tr class="alert-${s.alert}">
-      <td><strong>${s.slot_name}</strong></td>
-      <td><span class="owner-cell" onclick="editOwner(this,'${srv.url}','${s.slot_name}','${ownerSafe}')">${s.owner} <span style="opacity:.35;font-size:11px;vertical-align:middle">✎</span></span></td>
-      <td><span class="badge b-blue">${s.port}</span></td>
-      <td>${badge(s.container_status)}</td>
-      <td>${statsHtml(s.stats, s.metrics)}</td>
-      <td><span style="font-size:12px;color:var(--muted)">${expStr}</span><br><span style="color:${remColor};font-weight:700;font-size:12px">${s.remaining}</span></td>
-      <td>${replCellHtml(s.replica)}</td>
-      <td>
-        <div class="actions">
+    const conn = s.metrics?.Threads_connected ?? null;
+    return `
+      <div class="slot-card alert-${s.alert}">
+        <div class="slot-card-header">
+          <span class="slot-card-name">${s.slot_name}</span>
+          <span class="badge b-blue">${s.port}</span>
+          ${badge(s.container_status)}
+        </div>
+        <div class="slot-card-body">
+          <div class="slot-card-row">
+            <span class="slot-card-row-label">Owner</span>
+            <span class="owner-cell" onclick="editOwner(this,'${srv.url}','${s.slot_name}','${ownerSafe}')">${s.owner} <span style="opacity:.35;font-size:10px">✎</span></span>
+          </div>
+          ${s.stats ? `<div class="slot-card-row">
+            <span class="slot-card-row-label">CPU / Mem</span>
+            <span>${s.stats.cpu} &nbsp; ${s.stats.mem.split('/')[0].trim()}${conn!==null?' &nbsp; '+conn+' conn':''}</span>
+          </div>` : ''}
+          <div class="slot-card-row">
+            <span class="slot-card-row-label">Replicação</span>
+            <span>${replCellHtml(s.replica)}</span>
+          </div>
+          <div class="slot-card-row">
+            <span class="slot-card-row-label">Expira</span>
+            <span style="font-size:11px;color:var(--muted)">${s.expires_at.slice(0,16).replace('T',' ')}</span>
+          </div>
+          <div class="slot-card-ttl" style="color:${remColor}">${s.remaining}</div>
+        </div>
+        <div class="slot-card-actions">
           <button class="btn btn-sm" onclick="doLogs('${srv.url}','${s.slot_name}')">⬛ Logs</button>
           <button class="btn btn-warning btn-sm" onclick="doRestart('${srv.url}','${s.slot_name}',this)">↻ Restart</button>
           <button class="btn btn-danger btn-sm" onclick="doDestroy('${srv.url}','${s.slot_name}')">✕ Destruir</button>
         </div>
-      </td>
-    </tr>`;
-  }).join('') : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:28px">Nenhum slot ativo</td></tr>`;
+      </div>`;
+  }).join('') : `<div class="slot-empty">Nenhum slot ativo</div>`;
 
   return `
     <div class="server-section">
@@ -519,15 +543,7 @@ function renderServer(srv) {
       <div class="server-body" id="${sid}-body">
         ${renderTopology(d)}
         ${renderRepl(d.base_repl)}
-        <div class="table-wrap">
-          <table>
-            <thead><tr>
-              <th>Slot</th><th>Owner</th><th>Porta</th><th>Container</th>
-              <th>CPU / Mem</th><th>Expira / Restante</th><th>Replicação</th><th>Ações</th>
-            </tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
+        <div class="slot-grid">${cards}</div>
       </div>
     </div>`;
 }
