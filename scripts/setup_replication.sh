@@ -11,11 +11,13 @@ for var in REPLICATION_USER REPLICATION_PASSWORD CLONE_USER CLONE_PASSWORD; do
 done
 
 PRD_MODE="${PRD_MODE:-docker}"
+PRD_SSL="${PRD_SSL:-false}"
 
 if [ "$PRD_MODE" = "docker" ]; then
   PRD_HOST_INTERNAL="mysql-hml-prd"   # nome do container na rede mysql-hml
   PRD_PORT_INTERNAL=3306
   PRD_PASSWORD="$PRD_MYSQL_ROOT_PASSWORD"
+  PRD_SSL=false   # SSL não faz sentido em rede Docker local
 else
   [ -n "$PRD_HOST" ]     || error "PRD_HOST não definido para PRD_MODE=remote"
   [ -n "$PRD_USER" ]     || error "PRD_USER não definido para PRD_MODE=remote"
@@ -68,6 +70,9 @@ log "Criando usuário de replicação no PRD ($REPLICATION_USER)..."
 _prd_mysql() {
   if [ "$PRD_MODE" = "docker" ]; then
     docker exec mysql-hml-prd mysql -uroot -p"$PRD_PASSWORD" -sN 2>/dev/null "$@"
+  elif [ "$PRD_SSL" = "true" ]; then
+    mysql -h "$PRD_HOST" -P "$PRD_PORT_INTERNAL" -u "$PRD_USER" -p"$PRD_PASSWORD" \
+      --ssl-mode=REQUIRED -sN 2>/dev/null "$@"
   else
     mysql -h "$PRD_HOST" -P "$PRD_PORT_INTERNAL" -u "$PRD_USER" -p"$PRD_PASSWORD" -sN 2>/dev/null "$@"
   fi
@@ -137,12 +142,17 @@ if [ "${BASE_TABLES:-0}" = "0" ]; then
       | tr '\n' ' ' | xargs)
 
     if [ -n "$DATABASES" ]; then
+      SSL_OPT=""
+      [ "$PRD_SSL" = "true" ] && SSL_OPT="--ssl-mode=REQUIRED"
+      # RDS não concede SUPER; COMMENTED preserva os GTIDs como comentário
+      # para que o base possa aplicar sem conflito após ligar a replicação.
       # shellcheck disable=SC2086
       mysqldump -h "$PRD_HOST" -P "$PRD_PORT_INTERNAL" \
         -u "$PRD_USER" -p"$PRD_PASSWORD" \
+        $SSL_OPT \
         --databases $DATABASES \
         --single-transaction \
-        --set-gtid-purged=ON \
+        --set-gtid-purged=COMMENTED \
         --master-data=2 \
         --compress \
         2>/dev/null \
@@ -159,6 +169,9 @@ fi
 
 log "Configurando canal de replicação PRD → base..."
 
+SOURCE_SSL_CLAUSE=""
+[ "$PRD_SSL" = "true" ] && SOURCE_SSL_CLAUSE="SOURCE_SSL=1,"
+
 docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/null -e "
   STOP REPLICA;
   CHANGE REPLICATION SOURCE TO
@@ -166,6 +179,7 @@ docker exec mysql-hml-base mysql -uroot -p"$BASE_MYSQL_ROOT_PASSWORD" 2>/dev/nul
     SOURCE_PORT=${PRD_PORT_INTERNAL},
     SOURCE_USER='${REPLICATION_USER}',
     SOURCE_PASSWORD='${REPLICATION_PASSWORD}',
+    ${SOURCE_SSL_CLAUSE}
     SOURCE_AUTO_POSITION=1,
     SOURCE_CONNECT_RETRY=10,
     SOURCE_RETRY_COUNT=86400;

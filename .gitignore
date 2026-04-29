@@ -3,3 +3,18 @@ snapshots/
 docker/slot/*/
 registry/slots.lock
 .DS_Store
+
+# Credenciais reais — nunca commitar
+.env
+terraform/aws/terraform.tfvars
+terraform/oci/terraform.tfvars
+
+# Arquivos de estado do Terraform
+terraform/aws/.terraform/
+terraform/aws/.terraform.lock.hcl
+terraform/aws/terraform.tfstate
+terraform/aws/terraform.tfstate.backup
+terraform/oci/.terraform/
+terraform/oci/.terraform.lock.hcl
+terraform/oci/terraform.tfstate
+terraform/oci/terraform.tfstate.backup

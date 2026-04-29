@@ -46,9 +46,9 @@ resource "aws_db_instance" "prd" {
   backup_window           = "03:00-04:00"
   maintenance_window      = "sun:04:30-sun:05:30"
 
-  # Altere para true antes de ir para produção real
-  skip_final_snapshot = true
-  deletion_protection = false
+  skip_final_snapshot       = false
+  final_snapshot_identifier = "${local.prefix}-prd-final"
+  deletion_protection       = true
 
   tags = merge(local.common_tags, { Name = "${local.prefix}-prd", Role = "source" })
 }

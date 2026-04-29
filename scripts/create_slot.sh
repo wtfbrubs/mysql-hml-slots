@@ -30,8 +30,11 @@ function _slot_rollback() {
   [ -f "${SLOT_DIR}/docker-compose.yml" ] && \
     docker compose -f "$SLOT_DIR/docker-compose.yml" down -v 2>/dev/null || true
   docker rm -f "$SLOT_NAME" 2>/dev/null || true
-  [ -n "$DATA_DIR" ] && rm -rf "$DATA_DIR"
-  [ -n "$SLOT_DIR"  ] && rm -rf "$SLOT_DIR"
+  [ -n "$DATA_DIR" ] && docker run --rm \
+    -v "$ROOT_DIR/data:/data" \
+    --entrypoint sh "mysql:${MYSQL_VERSION}" \
+    -c "rm -rf /data/slots/$SLOT_NAME" 2>/dev/null || true
+  [ -n "$SLOT_DIR" ] && rm -rf "$SLOT_DIR" 2>/dev/null || true
   [ -f "$REGISTRY" ] || return 0
   TMP=$(mktemp)
   jq --arg n "$SLOT_NAME" \
@@ -41,6 +44,9 @@ function _slot_rollback() {
 trap '_slot_rollback' EXIT
 
 log "Criando slot '$SLOT_NAME' — porta $PORT | owner: $OWNER | TTL: ${TTL}h"
+
+docker network inspect mysql-hml > /dev/null 2>&1 \
+  || docker network create mysql-hml
 
 mkdir -p "$SLOT_DIR"
 docker run --rm \
