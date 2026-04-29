@@ -141,9 +141,10 @@ PAGE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HML Central</title>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2"></script>
 <style>
 :root{
   --bg:#0d0d0d;--surface:#161616;--surface-2:#1e1e1e;
@@ -176,7 +177,7 @@ main{padding:24px;max-width:1600px;margin:0 auto}
 .server-header:hover{background:var(--surface-2)}
 .server-name{font-weight:600;font-size:13px}
 .server-header::after{content:'';flex:1;height:1px;background:var(--border);margin-left:8px}
-.toggle-icon{display:inline-block;transition:transform .2s;font-size:13px;color:var(--muted)}
+.toggle-icon{transition:transform .2s;font-size:13px;color:var(--muted)}
 .server-header.collapsed .toggle-icon{transform:rotate(-90deg)}
 .server-body{padding:0 4px 8px}
 .server-body.hidden{display:none}
@@ -186,19 +187,26 @@ main{padding:24px;max-width:1600px;margin:0 auto}
 .repl-card-label{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:6px}
 .repl-card-value{font-size:1.1rem;font-weight:700}
 
-.slot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-top:4px}
-.slot-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s,box-shadow .15s}
-.slot-card:hover{border-color:var(--border-2);box-shadow:0 4px 20px rgba(0,0,0,.4)}
-.slot-card.alert-critical{border-color:rgba(248,113,113,.4)}
-.slot-card.alert-warning{border-color:rgba(251,191,36,.35)}
-.slot-card.alert-expired{opacity:.5}
-.slot-card-header{display:flex;align-items:center;gap:8px}
-.slot-card-name{font-weight:700;font-size:14px;flex:1}
-.slot-card-body{display:flex;flex-direction:column;gap:6px}
-.slot-card-row{display:flex;align-items:center;justify-content:space-between;font-size:12px}
-.slot-card-row-label{color:var(--muted);font-weight:500}
-.slot-card-ttl{font-size:13px;font-weight:700;text-align:right}
-.slot-card-actions{display:flex;gap:5px;flex-wrap:wrap;padding-top:4px;border-top:1px solid var(--border)}
+.slot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-top:4px}
+.slot-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;transition:border-color .15s,box-shadow .15s}
+.slot-card:hover{border-color:var(--border-2);box-shadow:0 4px 20px rgba(0,0,0,.5)}
+.slot-card.alert-critical{border-color:rgba(248,113,113,.35)}
+.slot-card.alert-warning{border-color:rgba(251,191,36,.3)}
+.slot-card.alert-expired{opacity:.45}
+.slot-accent{height:3px;background:var(--accent);flex-shrink:0}
+.slot-card.alert-critical .slot-accent{background:var(--danger)}
+.slot-card.alert-warning  .slot-accent{background:var(--warning)}
+.slot-card.alert-expired  .slot-accent{background:var(--border-2)}
+.slot-inner{padding:14px;display:flex;flex-direction:column;gap:12px;flex:1}
+.slot-header{display:flex;align-items:center;gap:6px}
+.slot-name{font-size:13px;font-weight:700;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.slot-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:3px}
+.slot-value{font-size:13px;color:var(--text)}
+.slot-ttl{font-size:15px;font-weight:700}
+.slot-cols{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.slot-repl{font-size:12px;line-height:1.6}
+.slot-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;padding:10px 14px;border-top:1px solid var(--border)}
+.slot-actions .btn{justify-content:center;padding:5px 4px;font-size:11px}
 .slot-empty{color:var(--muted);font-size:13px;padding:16px 4px;font-style:italic}
 
 .badge{display:inline-block;padding:2px 8px;border-radius:var(--radius-sm);font-size:11px;font-weight:600;white-space:nowrap}
@@ -372,6 +380,16 @@ const metricsHtml = (m) => {
   return `<div class="metrics">up <b>${up}</b><br>conn <b>${m.Threads_connected||'—'}</b><br>q <b>${m.Questions||m.Queries||'—'}</b></div>`;
 };
 
+const replCardHtml = (r) => {
+  if (!r) return '<span class="none">—</span>';
+  const io  = r.Slave_IO_Running  || r.io_running  || '?';
+  const sql = r.Slave_SQL_Running || r.sql_running || '?';
+  const lag = r.Seconds_Behind_Master ?? r.lag_int ?? null;
+  const dot = ok => `<span class="${ok==='Yes'?'repl-ok':'repl-err'}">●</span>`;
+  const err = r.Last_IO_Error || r.last_io_error || r.Last_SQL_Error || r.last_sql_error || '';
+  return `<span class="slot-repl">${dot(io)} IO &nbsp;${dot(sql)} SQL${lag!==null?` &nbsp;<b>${lag}s</b> lag`:''}${err?`<br><span class="repl-err" style="font-size:10px">${err.slice(0,45)}</span>`:''}</span>`;
+};
+
 const replCellHtml = (r) => {
   if (!r) return '<span class="none">—</span>';
   const io = r.Slave_IO_Running || r.io_running || '?';
@@ -478,7 +496,7 @@ function renderServer(srv) {
     return `
       <div class="server-section">
         <div class="server-header" onclick="toggleServer('${sid}')">
-          <span class="toggle-icon" id="${sid}-icon">▾</span>
+          <i class="ph ph-caret-down toggle-icon" id="${sid}-icon"></i>
           <span class="server-name">${srv.name}</span>
           ${badge('offline')}
           <span style="font-size:12px;color:var(--muted)">${srv.error||''}</span>
@@ -493,36 +511,51 @@ function renderServer(srv) {
     const remColor = s.alert==='expired'||s.alert==='critical' ? 'var(--danger)' : s.alert==='warning' ? 'var(--warning)' : 'var(--accent)';
     const ownerSafe = s.owner.replace(/'/g,"\\'");
     const conn = s.metrics?.Threads_connected ?? null;
+    const cpu  = s.stats?.cpu ?? null;
+    const mem  = s.stats ? s.stats.mem.split('/')[0].trim() : null;
+    const expiry = s.expires_at.slice(0,16).replace('T',' ');
     return `
       <div class="slot-card alert-${s.alert}">
-        <div class="slot-card-header">
-          <span class="slot-card-name">${s.slot_name}</span>
-          <span class="badge b-blue">${s.port}</span>
-          ${badge(s.container_status)}
-        </div>
-        <div class="slot-card-body">
-          <div class="slot-card-row">
-            <span class="slot-card-row-label">Owner</span>
-            <span class="owner-cell" onclick="editOwner(this,'${srv.url}','${s.slot_name}','${ownerSafe}')">${s.owner} <span style="opacity:.35;font-size:10px">✎</span></span>
+        <div class="slot-accent"></div>
+        <div class="slot-inner">
+          <div class="slot-header">
+            <span class="slot-name">${s.slot_name}</span>
+            <span class="badge b-blue">${s.port}</span>
+            ${badge(s.container_status)}
           </div>
-          ${s.stats ? `<div class="slot-card-row">
-            <span class="slot-card-row-label">CPU / Mem</span>
-            <span>${s.stats.cpu} &nbsp; ${s.stats.mem.split('/')[0].trim()}${conn!==null?' &nbsp; '+conn+' conn':''}</span>
+
+          <div class="slot-cols">
+            <div>
+              <div class="slot-label">Restante</div>
+              <div class="slot-ttl" style="color:${remColor}">${s.remaining}</div>
+            </div>
+            <div>
+              <div class="slot-label">Expira</div>
+              <div class="slot-value" style="font-size:12px">${expiry}</div>
+            </div>
+          </div>
+
+          <div>
+            <div class="slot-label">Owner</div>
+            <span class="owner-cell" onclick="editOwner(this,'${srv.url}','${s.slot_name}','${ownerSafe}')">
+              ${s.owner} <i class="ph ph-pencil-simple" style="opacity:.4;font-size:10px;vertical-align:middle"></i>
+            </span>
+          </div>
+
+          ${cpu ? `<div>
+            <div class="slot-label">CPU / Mem${conn!==null?' / Conn':''}</div>
+            <div class="slot-value">${cpu} &nbsp;·&nbsp; ${mem}${conn!==null?' &nbsp;·&nbsp; '+conn+' conn':''}</div>
           </div>` : ''}
-          <div class="slot-card-row">
-            <span class="slot-card-row-label">Replicação</span>
-            <span>${replCellHtml(s.replica)}</span>
+
+          <div>
+            <div class="slot-label">Replicação</div>
+            ${replCardHtml(s.replica)}
           </div>
-          <div class="slot-card-row">
-            <span class="slot-card-row-label">Expira</span>
-            <span style="font-size:11px;color:var(--muted)">${s.expires_at.slice(0,16).replace('T',' ')}</span>
-          </div>
-          <div class="slot-card-ttl" style="color:${remColor}">${s.remaining}</div>
         </div>
-        <div class="slot-card-actions">
-          <button class="btn btn-sm" onclick="doLogs('${srv.url}','${s.slot_name}')">⬛ Logs</button>
-          <button class="btn btn-warning btn-sm" onclick="doRestart('${srv.url}','${s.slot_name}',this)">↻ Restart</button>
-          <button class="btn btn-danger btn-sm" onclick="doDestroy('${srv.url}','${s.slot_name}')">✕ Destruir</button>
+        <div class="slot-actions">
+          <button class="btn" onclick="doLogs('${srv.url}','${s.slot_name}')"><i class="ph ph-terminal"></i> Logs</button>
+          <button class="btn btn-warning" onclick="doRestart('${srv.url}','${s.slot_name}',this)"><i class="ph ph-arrows-clockwise"></i> Restart</button>
+          <button class="btn btn-danger" onclick="doDestroy('${srv.url}','${s.slot_name}')"><i class="ph ph-trash"></i> Destruir</button>
         </div>
       </div>`;
   }).join('') : `<div class="slot-empty">Nenhum slot ativo</div>`;
@@ -530,15 +563,15 @@ function renderServer(srv) {
   return `
     <div class="server-section">
       <div class="server-header" onclick="toggleServer('${sid}')">
-        <span class="toggle-icon" id="${sid}-icon">▾</span>
+        <i class="ph ph-caret-down toggle-icon" id="${sid}-icon"></i>
         <span class="server-name">${srv.name}</span>
         ${badge('online')}
         <span class="badge b-gray">${slots.length} slot${slots.length!==1?'s':''}</span>
         <span style="font-size:12px;color:var(--muted)">base ${badge(d.base)} &nbsp; prd ${badge(d.prd)}</span>
         <span style="font-size:12px;color:var(--muted)">${snap?'snapshot '+snap.modified+' · '+snap.size_mb+'MB':''}</span>
         <span style="font-size:12px;color:var(--muted)">${srv.latency_ms!==null?srv.latency_ms+'ms':''}</span>
-        <button class="btn btn-accent btn-sm" style="margin-left:8px" onclick="event.stopPropagation();doRefresh('${srv.url}','${srv.name}')">↻ Voltar Base</button>
-        <button class="btn btn-sm" style="margin-left:4px" onclick="event.stopPropagation();openSlotModal('${srv.url}')">+ Criar Slot</button>
+        <button class="btn btn-accent btn-sm" style="margin-left:8px" onclick="event.stopPropagation();doRefresh('${srv.url}','${srv.name}')"><i class="ph ph-arrows-clockwise"></i> Voltar Base</button>
+        <button class="btn btn-sm" style="margin-left:4px" onclick="event.stopPropagation();openSlotModal('${srv.url}')"><i class="ph ph-plus"></i> Criar Slot</button>
       </div>
       <div class="server-body" id="${sid}-body">
         ${renderTopology(d)}
@@ -654,7 +687,7 @@ async function doRestart(agentUrl, slot, btn) {
     });
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '↻ Restart';
+    btn.innerHTML = '<i class="ph ph-arrows-clockwise"></i> Restart';
     load();
   }
 }
