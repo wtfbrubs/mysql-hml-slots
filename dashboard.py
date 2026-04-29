@@ -21,6 +21,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 PORT = int(os.environ.get("DASHBOARD_PORT", sys.argv[1] if len(sys.argv) > 1 else 8080))
+REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL", 15))
+AGENT_TIMEOUT    = int(os.environ.get("AGENT_TIMEOUT", 5))
 
 
 # ─── agents ───────────────────────────────────────────────────────────────────
@@ -50,7 +52,7 @@ def fetch_agent(agent: dict) -> dict:
     url = agent["url"] + "/api"
     try:
         t0 = time.time()
-        with urllib.request.urlopen(url, timeout=15) as r:
+        with urllib.request.urlopen(url, timeout=AGENT_TIMEOUT) as r:
             data = json.loads(r.read())
         return {**agent, "status": "online",  "data": data,
                 "error": None, "latency_ms": int((time.time() - t0) * 1000)}
@@ -110,6 +112,27 @@ def proxy(agent_url: str, path: str, method="GET", body: bytes = None):
         return 503, json.dumps({"error": str(e)}).encode()
 
 
+# ─── cache ────────────────────────────────────────────────────────────────────
+
+_cache: dict = {"data": None, "lock": threading.Lock()}
+
+
+def _background_refresh():
+    while True:
+        try:
+            data = fetch_all()
+            with _cache["lock"]:
+                _cache["data"] = data
+        except Exception:
+            pass
+        time.sleep(REFRESH_INTERVAL)
+
+
+def get_cached() -> dict:
+    with _cache["lock"]:
+        return _cache["data"]
+
+
 # ─── HTML ─────────────────────────────────────────────────────────────────────
 
 PAGE = """<!DOCTYPE html>
@@ -118,10 +141,9 @@ PAGE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HML Central</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+</style>
 <style>
 :root{
   --bg:#0d0d0d;--surface:#161616;--surface-2:#1e1e1e;
@@ -154,7 +176,7 @@ main{padding:24px;max-width:1600px;margin:0 auto}
 .server-header:hover{background:var(--surface-2)}
 .server-name{font-weight:600;font-size:13px}
 .server-header::after{content:'';flex:1;height:1px;background:var(--border);margin-left:8px}
-.toggle-icon{transition:transform .2s;font-size:13px;color:var(--muted)}
+.toggle-icon{display:inline-block;transition:transform .2s;font-size:13px;color:var(--muted)}
 .server-header.collapsed .toggle-icon{transform:rotate(-90deg)}
 .server-body{padding:0 4px 8px}
 .server-body.hidden{display:none}
@@ -411,7 +433,7 @@ function renderServer(srv) {
     return `
       <div class="server-section">
         <div class="server-header" onclick="toggleServer('${sid}')">
-          <i class="ph ph-caret-down toggle-icon" id="${sid}-icon"></i>
+          <span class="toggle-icon" id="${sid}-icon">▾</span>
           <span class="server-name">${srv.name}</span>
           ${badge('offline')}
           <span style="font-size:12px;color:var(--muted)">${srv.error||''}</span>
@@ -428,7 +450,7 @@ function renderServer(srv) {
     const ownerSafe = s.owner.replace(/'/g,"\\'");
     return `<tr class="alert-${s.alert}">
       <td><strong>${s.slot_name}</strong></td>
-      <td><span class="owner-cell" onclick="editOwner(this,'${srv.url}','${s.slot_name}','${ownerSafe}')">${s.owner} <i class="ph ph-pencil-simple" style="opacity:.35;font-size:11px;vertical-align:middle"></i></span></td>
+      <td><span class="owner-cell" onclick="editOwner(this,'${srv.url}','${s.slot_name}','${ownerSafe}')">${s.owner} <span style="opacity:.35;font-size:11px;vertical-align:middle">✎</span></span></td>
       <td><span class="badge b-blue">${s.port}</span></td>
       <td>${badge(s.container_status)}</td>
       <td>${statsHtml(s.stats, s.metrics)}</td>
@@ -436,8 +458,8 @@ function renderServer(srv) {
       <td>${replCellHtml(s.replica)}</td>
       <td>
         <div class="actions">
-          <button class="btn btn-sm" onclick="doLogs('${srv.url}','${s.slot_name}')"><i class="ph ph-terminal"></i> Logs</button>
-          <button class="btn btn-warning btn-sm" onclick="doRestart('${srv.url}','${s.slot_name}',this)"><i class="ph ph-arrows-clockwise"></i> Restart</button>
+          <button class="btn btn-sm" onclick="doLogs('${srv.url}','${s.slot_name}')">⬛ Logs</button>
+          <button class="btn btn-warning btn-sm" onclick="doRestart('${srv.url}','${s.slot_name}',this)">↻ Restart</button>
         </div>
       </td>
     </tr>`;
@@ -446,14 +468,14 @@ function renderServer(srv) {
   return `
     <div class="server-section">
       <div class="server-header" onclick="toggleServer('${sid}')">
-        <i class="ph ph-caret-down toggle-icon" id="${sid}-icon"></i>
+        <span class="toggle-icon" id="${sid}-icon">▾</span>
         <span class="server-name">${srv.name}</span>
         ${badge('online')}
         <span class="badge b-gray">${slots.length} slot${slots.length!==1?'s':''}</span>
         <span style="font-size:12px;color:var(--muted)">base ${badge(d.base)} &nbsp; prd ${badge(d.prd)}</span>
         <span style="font-size:12px;color:var(--muted)">${snap?'snapshot '+snap.modified+' · '+snap.size_mb+'MB':''}</span>
         <span style="font-size:12px;color:var(--muted)">${srv.latency_ms!==null?srv.latency_ms+'ms':''}</span>
-        <button class="btn btn-accent btn-sm" style="margin-left:8px" onclick="event.stopPropagation();doRefresh('${srv.url}','${srv.name}')"><i class="ph ph-arrows-clockwise"></i> Voltar Base</button>
+        <button class="btn btn-accent btn-sm" style="margin-left:8px" onclick="event.stopPropagation();doRefresh('${srv.url}','${srv.name}')">↻ Voltar Base</button>
       </div>
       <div class="server-body" id="${sid}-body">
         ${renderTopology(d)}
@@ -577,7 +599,7 @@ async function doRestart(agentUrl, slot, btn) {
     });
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '<i class="ph ph-arrows-clockwise"></i> Restart';
+    btn.innerHTML = '↻ Restart';
     load();
   }
 }
@@ -675,7 +697,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         qs   = parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
 
         if path == "/api":
-            self.send_json(200, fetch_all())
+            data = get_cached()
+            if data is None:
+                data = fetch_all()
+                with _cache["lock"]:
+                    _cache["data"] = data
+            self.send_json(200, data)
 
         elif path == "/action/status":
             url = agent_url_for(qs)
@@ -743,6 +770,7 @@ if __name__ == "__main__":
     print(f"Agents configurados ({len(agents)}):")
     for a in agents:
         print(f"  {a['name']} → {a['url']}")
+    threading.Thread(target=_background_refresh, daemon=True, name="cache-refresh").start()
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     try:
         server.serve_forever()

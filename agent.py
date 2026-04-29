@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(os.environ.get("PROJECT_ROOT", Path(__file__).parent))
 PORT = int(os.environ.get("AGENT_PORT", sys.argv[1] if len(sys.argv) > 1 else 8766))
 SERVER_NAME = os.environ.get("SERVER_NAME", socket.gethostname())
+REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL", 10))
 
 # ─── jobs ─────────────────────────────────────────────────────────────────────
 
@@ -246,6 +247,27 @@ def get_data() -> dict:
     }
 
 
+# ─── cache ────────────────────────────────────────────────────────────────────
+
+_cache: dict = {"data": None, "lock": threading.Lock()}
+
+
+def _background_refresh():
+    while True:
+        try:
+            data = get_data()
+            with _cache["lock"]:
+                _cache["data"] = data
+        except Exception:
+            pass
+        threading.Event().wait(REFRESH_INTERVAL)
+
+
+def get_cached() -> dict:
+    with _cache["lock"]:
+        return _cache["data"]
+
+
 # ─── HTTP handler ─────────────────────────────────────────────────────────────
 
 def parse_qs(q: str) -> dict:
@@ -279,7 +301,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                  "timestamp": datetime.now().isoformat()})
 
         elif path == "/api":
-            self.send_json(200, get_data())
+            data = get_cached()
+            if data is None:
+                data = get_data()
+                with _cache["lock"]:
+                    _cache["data"] = data
+            self.send_json(200, data)
 
         elif path == "/action/status":
             with _jobs_lock:
@@ -357,6 +384,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=_background_refresh, daemon=True, name="cache-refresh").start()
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"HML Agent [{SERVER_NAME}] em http://0.0.0.0:{PORT}")
     try:

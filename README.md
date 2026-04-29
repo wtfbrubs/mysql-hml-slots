@@ -1,5 +1,13 @@
 # mysql-hml-slots
 
+[![Slot PR](https://github.com/wtfbrubs/mysql-hml-slots/actions/workflows/slot-pr.yml/badge.svg)](https://github.com/wtfbrubs/mysql-hml-slots/actions/workflows/slot-pr.yml)
+[![Slot Manage](https://github.com/wtfbrubs/mysql-hml-slots/actions/workflows/slot-manage.yml/badge.svg)](https://github.com/wtfbrubs/mysql-hml-slots/actions/workflows/slot-manage.yml)
+[![Slot Expire](https://github.com/wtfbrubs/mysql-hml-slots/actions/workflows/slot-expire.yml/badge.svg)](https://github.com/wtfbrubs/mysql-hml-slots/actions/workflows/slot-expire.yml)
+![MySQL](https://img.shields.io/badge/MySQL-8.4-blue?logo=mysql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 Solução automatizada para replicar um banco MySQL de Produção para um ambiente de Homologação (HML) com suporte a múltiplos **slots** isolados — cada slot é uma instância MySQL efêmera com TTL configurável, criada em segundos via Clone Plugin.
 
 ## Arquitetura
