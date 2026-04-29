@@ -50,9 +50,8 @@ replication-status:
 agent:
 	python3 agent.py
 
-# ── Dashboard local (sem Docker) ─────────────────────────────────────────────
-dashboard:
-	python3 dashboard.py
+# ── Dashboard em Docker ───────────────────────────────────────────────────────
+dashboard: dashboard-up
 
 # ── Docker: agente por servidor ──────────────────────────────────────────────
 agent-build:

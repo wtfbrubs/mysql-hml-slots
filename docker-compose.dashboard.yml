@@ -11,7 +11,7 @@ services:
       DASHBOARD_PORT: "8080"
       # Comma-separated list of agents: "server1=http://192.168.1.10:8766,server2=http://192.168.1.11:8766"
       # Or leave empty and mount agents.json
-      AGENTS: "${AGENTS:-}"
+      AGENTS: "${AGENTS:-local=http://host.docker.internal:8766}"
     volumes:
       # Optional: mount agents.json for static config
       - "${AGENTS_CONFIG:-/dev/null}:/app/agents.json:ro"
