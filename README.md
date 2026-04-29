@@ -1,17 +1,17 @@
 # mysql-hml-slots
 
-Solução automatizada para replicar um banco MySQL de Produção para um ambiente de Homologação (HML) com suporte a múltiplos **slots** isolados — cada slot é uma instância MySQL efêmera, restaurada a partir de um snapshot do PRD, com TTL configurável.
+Solução automatizada para replicar um banco MySQL de Produção para um ambiente de Homologação (HML) com suporte a múltiplos **slots** isolados — cada slot é uma instância MySQL efêmera com TTL configurável, criada em segundos via Clone Plugin.
 
 ## Arquitetura
 
 ```
 PRD (RDS MySQL / container local)
         │
-        │  refresh_base.sh  (mysqldump)
+        │  Replicação GTID nativa (binlog)
         ▼
- mysql-hml-base  (container Docker)
+ mysql-hml-base  (container Docker — réplica read-only)
         │
-        │  snapshot.sh  →  snapshots/latest.sql.gz
+        │  MySQL Clone Plugin (segundos) ou snapshot fallback
         ▼
  ┌──────────────────────────────────────┐
  │  Slots (containers efêmeros)         │
@@ -20,9 +20,15 @@ PRD (RDS MySQL / container local)
  │  hml-02  :3311  TTL 24h             │
  │  hml-03  :3312  TTL 24h             │
  └──────────────────────────────────────┘
+        │
+        │  Agente JSON API por servidor (agent.py :8766)
+        ▼
+ Dashboard Central (dashboard.py :8080)
+ ← agrega N servidores em paralelo →
 ```
 
 Cada slot:
+- É criado via **Clone Plugin** (O(minutos) mesmo em 1 TB) com fallback para snapshot (mysqldump)
 - Tem seu próprio diretório de dados (`data/slots/<name>/`)
 - Tem `server-id` único (derivado da porta)
 - É destruído automaticamente ao expirar o TTL
@@ -36,14 +42,15 @@ Cada slot:
 |---|---|
 | Docker + Compose plugin | 24+ / v2 |
 | `jq` | 1.6+ |
+| Python | 3.10+ (stdlib, sem dependências extras) |
 | `flock`, `ss`, `envsubst`, `zcat` | padrão Linux |
 
 ```bash
 # Ubuntu/Debian
-sudo apt-get install -y jq
+sudo apt-get install -y jq python3
 
-# Amazon Linux 2 (cloud)
-sudo yum install -y jq mysql
+# Amazon Linux 2
+sudo yum install -y jq python3 mysql
 ```
 
 ---
@@ -57,7 +64,21 @@ make up-prd     # MySQL PRD na porta 3307
 make up-base    # MySQL HML base na porta 3306
 ```
 
-### 2. Popular o PRD com dados de teste (opcional)
+### 2. Configurar replicação PRD → base (recomendado)
+
+```bash
+make setup-replication
+```
+
+Cria usuário de replicação no PRD, usuário Clone Plugin no base, inicia replicação GTID. Executa uma vez; a replicação é persistente.
+
+Verificar status:
+
+```bash
+make replication-status
+```
+
+### 3. Popular o PRD com dados de teste (opcional)
 
 ```bash
 mysql -h 127.0.0.1 -P 3307 -uroot -pprd-root123 <<'SQL'
@@ -68,56 +89,125 @@ INSERT INTO produtos (nome) VALUES ('Teclado'), ('Monitor'), ('Mouse');
 SQL
 ```
 
-### 3. Ciclo completo: refresh + snapshot + slot
+### 4. Ciclo completo: refresh + snapshot
+
+Necessário apenas se **não** usar replicação nativa:
 
 ```bash
-make refresh    # copia PRD → base + gera snapshot automaticamente
+make refresh    # copia PRD → base via mysqldump + gera snapshot
 ```
 
-Ou em passos separados:
+Ou apenas snapshot do estado atual do base:
 
 ```bash
-make snapshot   # apenas gera snapshot do estado atual do base
+make snapshot
 ```
 
-### 4. Criar slots
+### 5. Criar slots
 
 ```bash
 make create-slot name=hml-01 owner=bruno ttl=24
 make create-slot name=hml-02 owner=alice ttl=24
 ```
 
-### 5. Conectar ao slot
+Se o Clone Plugin estiver ativo, cada slot é criado em segundos clonando diretamente do base. Caso contrário usa o último `snapshots/latest.sql.gz`.
+
+### 6. Conectar ao slot
 
 ```bash
 mysql -h 127.0.0.1 -P 3310 -uroot -proot123   # hml-01
 mysql -h 127.0.0.1 -P 3311 -uroot -proot123   # hml-02
 ```
 
-### 6. Listar slots
+### 7. Listar, destruir e expirar
 
 ```bash
 make list
-```
-
-```
-SLOT                   OWNER           PORTA  STATUS     CRIADO EM                  EXPIRA EM
-----                   -----           -----  ------     ---------                  ---------
-hml-01                 bruno           3310   running    2026-04-28T10:00:00-03:00  2026-04-29T10:00:00-03:00
-hml-02                 alice           3311   running    2026-04-28T10:05:00-03:00  2026-04-29T10:05:00-03:00
-```
-
-### 7. Destruir slot
-
-```bash
-make destroy-slot name=feat-login
-```
-
-### 8. Destruir slots expirados
-
-```bash
+make destroy-slot name=hml-01
 make expire
 ```
+
+---
+
+## Dashboard
+
+Interface web para monitorar todos os slots, replicação e containers em tempo real.
+
+### Subir localmente
+
+```bash
+# Terminal 1 — agente que coleta dados deste servidor
+python3 agent.py
+
+# Terminal 2 — dashboard central apontando para o agente
+AGENTS="BRUNO-PC=http://localhost:8766" python3 dashboard.py
+```
+
+Abrir em: **http://localhost:8080**
+
+Ou via Makefile:
+
+```bash
+make agent      # porta 8766
+make dashboard  # porta 8080  (requer AGENTS no ambiente)
+```
+
+### Multi-servidor (Docker / Portainer)
+
+**Em cada servidor HML** — implantar `docker-compose.agent.yml`:
+
+```bash
+PROJECT_ROOT=/home/ubuntu/mysql-hml-slots \
+SERVER_NAME=servidor-01 \
+docker compose -f docker-compose.agent.yml up -d
+```
+
+Ou via Makefile:
+
+```bash
+make agent-up    # usa PROJECT_ROOT=$(CURDIR) e SERVER_NAME do hostname
+make agent-down
+```
+
+**No servidor do dashboard central** — implantar `docker-compose.dashboard.yml`:
+
+```bash
+AGENTS="servidor-01=http://192.168.1.10:8766,servidor-02=http://192.168.1.11:8766" \
+docker compose -f docker-compose.dashboard.yml up -d
+```
+
+Ou montar `agents.json` (copie de `agents.json.example`):
+
+```bash
+AGENTS_CONFIG=/etc/hml/agents.json \
+docker compose -f docker-compose.dashboard.yml up -d
+```
+
+Ou via Makefile:
+
+```bash
+make dashboard-up
+make dashboard-down
+```
+
+### Endpoints do agente (`:8766`)
+
+| Endpoint | Método | Descrição |
+|---|---|---|
+| `/health` | GET | Status do agente |
+| `/api` | GET | Dados completos: slots, base, prd, replicação, snapshot |
+| `/logs?slot=hml-01` | GET | Últimas 100 linhas de log do container |
+| `/action/refresh` | POST | Reinicia replicação do base (`STOP/START REPLICA`) |
+| `/action/restart` | POST `{"slot":"hml-01"}` | Reinicia container do slot |
+| `/action/status?job_id=X` | GET | Status de job em background |
+
+### Funcionalidades do dashboard
+
+- Cards globais: servidores online, total de slots, expirando em breve, erros de replicação
+- Seção por servidor: status do base e PRD, métricas de replicação (IO/SQL thread, lag, GTID)
+- Tabela de slots: status, TTL restante, dono, CPU/mem, queries, alertas de expiração
+- Ações: reiniciar slot, voltar replicação do base, ver logs em modal
+- Atualização automática a cada 30 segundos
 
 ---
 
@@ -125,36 +215,43 @@ make expire
 
 | Comando | Descrição |
 |---|---|
-| `make up-prd` | Sobe MySQL PRD local (simulação) na porta 3307 |
+| `make up-prd` | Sobe MySQL PRD local (porta 3307) |
 | `make down-prd` | Para o MySQL PRD local |
-| `make up-base` | Sobe MySQL HML base na porta 3306 |
+| `make up-base` | Sobe MySQL HML base (porta 3306) |
 | `make down-base` | Para o MySQL HML base |
-| `make refresh` | Copia dados do PRD para o base e gera snapshot |
+| `make setup-replication` | Configura replicação GTID nativa PRD → base |
+| `make replication-status` | Mostra status da replicação do base |
+| `make refresh` | Copia PRD → base via mysqldump + snapshot |
 | `make snapshot` | Gera snapshot do base sem refresh |
-| `make create-slot name=X [owner=Y] [ttl=Z]` | Cria slot restaurado do último snapshot |
-| `make destroy-slot name=X` | Destrói slot e remove todos os dados |
+| `make create-slot name=X [owner=Y] [ttl=Z]` | Cria slot (Clone Plugin ou snapshot) |
+| `make destroy-slot name=X` | Destrói slot e remove dados |
 | `make list` | Lista slots com status de expiração |
-| `make expire` | Destrói todos os slots com TTL expirado |
+| `make expire` | Destrói slots com TTL expirado |
+| `make agent` | Sobe agente local (porta 8766) |
+| `make dashboard` | Sobe dashboard local (porta 8080) |
+| `make agent-up` | Sobe agente em Docker |
+| `make agent-down` | Para agente Docker |
+| `make dashboard-up` | Sobe dashboard central em Docker |
+| `make dashboard-down` | Para dashboard Docker |
+| `make github-labels [n=10]` | Cria labels hml-01..hml-NN no GitHub |
 
 ### Variáveis do `create-slot`
 
 | Variável | Padrão | Descrição |
 |---|---|---|
-| `name` | *(obrigatório)* | Nome do slot — seguir padrão `hml-NN` (ex: `hml-01`) |
+| `name` | *(obrigatório)* | Nome do slot — padrão `hml-NN` (ex: `hml-01`) |
 | `owner` | `unknown` | Responsável pelo slot |
 | `ttl` | `24` | Tempo de vida em horas |
 
 ### Padrão de nomenclatura e portas
 
-O padrão adotado é `hml-NN`, onde `NN` é um número sequencial por ambiente/desenvolvedor. A porta é **determinística** — derivada automaticamente do sufixo numérico — garantindo string de conexão fixa independente de destroy e recreate:
+O padrão adotado é `hml-NN`, onde `NN` é um número sequencial por ambiente/desenvolvedor. A porta é **determinística** — derivada do sufixo numérico — garantindo string de conexão fixa independente de destroy/recreate:
 
 | Slot | Porta |
 |---|---|
 | `hml-01` | `3310` |
 | `hml-02` | `3311` |
 | `hml-NN` | `3309 + N` |
-
-Isso permite que cada dev configure sua string de conexão uma única vez e nunca precise alterá-la.
 
 ---
 
@@ -165,7 +262,7 @@ Isso permite que cada dev configure sua string de conexão uma única vez e nunc
 BASE_MYSQL_PORT=3306
 BASE_MYSQL_ROOT_PASSWORD=root123
 MYSQL_VERSION=8.4
-SLOTS_BASE_PORT=3310        # porta inicial dos slots
+SLOTS_BASE_PORT=3310
 SNAPSHOT_DIR=snapshots
 
 # PRD local (simulação)
@@ -178,6 +275,17 @@ PRD_MODE=docker             # docker | remote
 # PRD_PORT=3306
 # PRD_USER=admin
 # PRD_MYSQL_ROOT_PASSWORD=<senha>
+
+# Replicação nativa (make setup-replication)
+REPLICATION_USER=hml_repl
+REPLICATION_PASSWORD=repl-secret-change-me
+
+# Clone Plugin para criação de slots rápida
+CLONE_USER=hml_clone
+CLONE_PASSWORD=clone-secret-change-me
+
+# Lag máximo aceitável antes de tirar snapshot (segundos)
+MAX_LAG_SECONDS=30
 ```
 
 ---
@@ -186,26 +294,32 @@ PRD_MODE=docker             # docker | remote
 
 ```
 mysql-hml-slots/
+├── agent.py                    # API JSON por servidor (porta 8766)
+├── dashboard.py                # Dashboard central multi-servidor (porta 8080)
+├── Dockerfile                  # Imagem única para agent e dashboard
+├── docker-compose.agent.yml    # Stack Portainer por servidor
+├── docker-compose.dashboard.yml # Stack do dashboard central
+├── agents.json.example         # Exemplo de config multi-servidor
 ├── docker/
-│   ├── base/               # MySQL HML base
-│   ├── prd/                # MySQL PRD simulado (local)
-│   └── slot/               # Template para slots efêmeros
+│   ├── base/                   # MySQL HML base (my.cnf + compose)
+│   ├── prd/                    # MySQL PRD simulado
+│   └── slot/                   # Template docker-compose para slots
 ├── scripts/
-│   ├── common.sh           # Funções compartilhadas (log, lock, wait_for_mysql)
-│   ├── refresh_base.sh     # Copia PRD → base + snapshot
-│   ├── snapshot.sh         # Gera snapshot do base
-│   ├── create_slot.sh      # Cria slot com restore + rollback automático
-│   ├── destroy_slot.sh     # Destroi slot e limpa dados
-│   ├── expire_slots.sh     # Remove slots com TTL expirado
-│   ├── list_slots.sh       # Lista slots com status
-│   └── next_port.sh        # Porta determinística por sufixo (hml-01→3310) ou dinâmica
+│   ├── common.sh               # Funções compartilhadas (log, lock, wait_for_mysql)
+│   ├── setup_replication.sh    # Bootstrap replicação GTID PRD → base
+│   ├── refresh_base.sh         # Sincroniza base + snapshot (detecta replicação)
+│   ├── snapshot.sh             # Gera snapshot do base
+│   ├── create_slot.sh          # Cria slot (Clone Plugin ou snapshot + rollback)
+│   ├── destroy_slot.sh         # Destroi slot e limpa dados
+│   ├── expire_slots.sh         # Remove slots com TTL expirado
+│   ├── list_slots.sh           # Lista slots com status
+│   └── next_port.sh            # Porta determinística por sufixo numérico
 ├── registry/
-│   └── slots.json          # Estado dos slots ativos
-├── snapshots/              # Dumps comprimidos (gerado, ignorado pelo git)
-├── data/                   # Dados dos containers (gerado, ignorado pelo git)
-├── terraform/              # Infraestrutura cloud (AWS)
-├── .github/workflows/      # CI/CD para gerenciar slots remotamente
-└── Makefile
+│   └── slots.json              # Estado dos slots ativos
+├── snapshots/                  # Dumps comprimidos (gerado, ignorado pelo git)
+├── data/                       # Dados dos containers (gerado, ignorado pelo git)
+├── terraform/                  # Infraestrutura cloud (AWS)
+└── .github/workflows/          # CI/CD para gerenciar slots remotamente
 ```
 
 ---
@@ -293,8 +407,6 @@ Cada desenvolvedor tem um slot fixo (`hml-01`, `hml-02`, ...). Para subir o ambi
 
 4. Ao mergear ou fechar o PR, o slot é destruído automaticamente.
 
----
-
 ### Gerenciar slots manualmente
 
 `Actions → HML Slots — Gerenciar → Run workflow`
@@ -309,3 +421,19 @@ Cada desenvolvedor tem um slot fixo (`hml-01`, `hml-02`, ...). Para subir o ambi
 ### Expiração agendada
 
 `HML Slots — Expirar` roda automaticamente todo dia à 01:00 UTC e pode ser acionado manualmente.
+
+### Runner local (self-hosted)
+
+Para testar pipelines sem AWS, configure um runner self-hosted:
+
+```bash
+# Baixar e configurar
+mkdir actions-runner && cd actions-runner
+curl -o actions-runner-linux-x64.tar.gz -L \
+  https://github.com/actions/runner/releases/download/v2.322.0/actions-runner-linux-x64-2.322.0.tar.gz
+tar xzf actions-runner-linux-x64.tar.gz
+./config.sh --url https://github.com/<org>/<repo> --token <TOKEN>
+./run.sh
+```
+
+Com o runner ativo, use o workflow `slot-local.yml` que roda `make` diretamente no projeto sem checkout nem AWS.
