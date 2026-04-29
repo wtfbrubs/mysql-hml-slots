@@ -1,0 +1,26 @@
+services:
+  hml-agent:
+    build: .
+    image: mysql-hml-agent:latest
+    container_name: hml-agent
+    restart: unless-stopped
+    command: python3 agent.py
+    ports:
+      - "${AGENT_PORT:-8766}:8766"
+    environment:
+      SERVER_NAME: "${SERVER_NAME:-}"
+      PROJECT_ROOT: /project
+      AGENT_PORT: "8766"
+    volumes:
+      # Acesso aos dados e registry do projeto
+      - "${PROJECT_ROOT:-.}:/project:ro"
+      # Registry precisa de escrita para lock
+      - "${PROJECT_ROOT:-.}/registry:/project/registry"
+      # Socket Docker para inspecionar/controlar containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - hml-agent-net
+
+networks:
+  hml-agent-net:
+    driver: bridge

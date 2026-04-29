@@ -1,356 +1,176 @@
 #!/usr/bin/env python3
 """
-HML Slots Dashboard
-Uso: python3 dashboard.py [porta]   (padrão: 8765)
+HML Central Dashboard — agrega múltiplos agents.
+Porta padrão: 8765
+
+Variáveis de ambiente:
+  AGENTS        Lista de agents: nome=http://host:8766,nome2=http://host2:8766
+                Se não definido, lê agents.json. Fallback: local agent em :8766.
+  DASHBOARD_PORT  Porta de escuta (padrão: 8765)
 """
 import http.server
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
-import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-
-# ─── background jobs ─────────────────────────────────────────────────────────
-
-_jobs: dict = {}
-_jobs_lock = threading.Lock()
+PORT = int(os.environ.get("DASHBOARD_PORT", sys.argv[1] if len(sys.argv) > 1 else 8080))
 
 
-def start_job(label: str, cmd: list, cwd=ROOT) -> str:
-    job_id = str(uuid.uuid4())[:8]
-    with _jobs_lock:
-        _jobs[job_id] = {"label": label, "status": "running", "output": "", "started": datetime.now().strftime("%H:%M:%S")}
+# ─── agents ───────────────────────────────────────────────────────────────────
 
-    def _run():
-        try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, cwd=cwd,
-            )
-            out = []
-            for line in proc.stdout:
-                out.append(line)
-                with _jobs_lock:
-                    _jobs[job_id]["output"] = "".join(out)
-            proc.wait()
-            status = "done" if proc.returncode == 0 else "error"
-        except Exception as e:
-            status = "error"
-            with _jobs_lock:
-                _jobs[job_id]["output"] += f"\nException: {e}"
-        with _jobs_lock:
-            _jobs[job_id]["status"] = status
+def load_agents() -> list[dict]:
+    raw = os.environ.get("AGENTS", "").strip()
+    if raw:
+        agents = []
+        for part in raw.split(","):
+            part = part.strip()
+            if "=" in part:
+                name, _, url = part.partition("=")
+            else:
+                name = part.split(":")[0]
+                url  = part
+            agents.append({"name": name.strip(), "url": url.strip().rstrip("/")})
+        return agents
 
-    threading.Thread(target=_run, daemon=True).start()
-    return job_id
+    agents_file = ROOT / "agents.json"
+    if agents_file.exists():
+        return json.loads(agents_file.read_text())
+
+    return [{"name": "local", "url": "http://localhost:8766"}]
 
 
-# ─── helpers ─────────────────────────────────────────────────────────────────
-
-def load_env() -> dict:
-    env = {}
-    env_file = ROOT / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                env[k.strip()] = v.strip()
-    return env
-
-
-def docker_status(name: str) -> str:
+def fetch_agent(agent: dict) -> dict:
+    url = agent["url"] + "/api"
     try:
-        return subprocess.check_output(
-            ["docker", "inspect", "--format", "{{.State.Status}}", name],
-            stderr=subprocess.DEVNULL, timeout=5,
-        ).decode().strip()
-    except Exception:
-        return "not found"
-
-
-def docker_stats(name: str) -> dict | None:
-    try:
-        out = subprocess.check_output(
-            ["docker", "stats", "--no-stream", "--format",
-             "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}", name],
-            stderr=subprocess.DEVNULL, timeout=10,
-        ).decode().strip()
-        cpu, mem, mem_pct = out.split("\t")
-        return {"cpu": cpu, "mem": mem, "mem_pct": mem_pct}
-    except Exception:
-        return None
-
-
-def mysql_metrics(container: str, password: str) -> dict | None:
-    try:
-        out = subprocess.check_output(
-            ["docker", "exec", container,
-             "mysql", "-uroot", f"-p{password}", "-sN", "-e",
-             "SHOW GLOBAL STATUS WHERE Variable_name IN "
-             "('Uptime','Threads_connected','Questions','Queries')"],
-            stderr=subprocess.DEVNULL, timeout=5,
-        ).decode().strip()
-        metrics = {}
-        for line in out.splitlines():
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                metrics[parts[0]] = parts[1]
-        return metrics
-    except Exception:
-        return None
-
-
-def base_replica_status(password: str) -> dict | None:
-    """Consulta SHOW REPLICA STATUS no base e retorna dict estruturado."""
-    try:
-        out = subprocess.check_output(
-            ["docker", "exec", "mysql-hml-base",
-             "mysql", "-uroot", f"-p{password}", "-sN",
-             "-e", "SHOW REPLICA STATUS\\G"],
-            stderr=subprocess.DEVNULL, timeout=8,
-        ).decode().strip()
-        if not out:
-            return {"configured": False}
-        fields = {}
-        for line in out.splitlines():
-            line = line.strip()
-            if ": " in line:
-                k, _, v = line.partition(": ")
-                fields[k.strip()] = v.strip()
-        lag_raw = fields.get("Seconds_Behind_Source") or fields.get("Seconds_Behind_Master")
-        return {
-            "configured": True,
-            "io_running": fields.get("Replica_IO_Running") or fields.get("Slave_IO_Running", "?"),
-            "sql_running": fields.get("Replica_SQL_Running") or fields.get("Slave_SQL_Running", "?"),
-            "lag": lag_raw,
-            "lag_int": int(lag_raw) if lag_raw and lag_raw.isdigit() else None,
-            "source_host": fields.get("Source_Host") or fields.get("Master_Host", ""),
-            "source_port": fields.get("Source_Port") or fields.get("Master_Port", ""),
-            "last_io_error": fields.get("Last_IO_Error", ""),
-            "last_sql_error": fields.get("Last_SQL_Error", ""),
-            "gtid_received": fields.get("Retrieved_Gtid_Set", ""),
-            "gtid_executed": fields.get("Executed_Gtid_Set", ""),
-            "channel": fields.get("Channel_Name", ""),
-        }
-    except Exception:
-        return None
-
-
-def replica_status(container: str, password: str) -> dict | None:
-    try:
-        out = subprocess.check_output(
-            ["docker", "exec", container,
-             "mysql", "-uroot", f"-p{password}", "-sN",
-             "-e", "SHOW REPLICA STATUS"],
-            stderr=subprocess.DEVNULL, timeout=5,
-        ).decode().strip()
-        if not out:
-            return None
-        fields = [
-            "Slave_IO_State", "Master_Host", "Master_User", "Master_Port",
-            "Connect_Retry", "Master_Log_File", "Read_Master_Log_Pos",
-            "Relay_Log_File", "Relay_Log_Pos", "Relay_Master_Log_File",
-            "Slave_IO_Running", "Slave_SQL_Running", "Replicate_Do_DB",
-            "Replicate_Ignore_DB", "Replicate_Do_Table", "Replicate_Ignore_Table",
-            "Replicate_Wild_Do_Table", "Replicate_Wild_Ignore_Table",
-            "Last_Errno", "Last_Error", "Skip_Counter", "Exec_Master_Log_Pos",
-            "Relay_Log_Space", "Until_Condition", "Until_Log_File", "Until_Log_Pos",
-            "Master_SSL_Allowed", "Master_SSL_CA_File", "Master_SSL_CA_Path",
-            "Master_SSL_Cert", "Master_SSL_Cipher", "Master_SSL_Key",
-            "Seconds_Behind_Master", "Master_SSL_Verify_Server_Cert",
-            "Last_IO_Errno", "Last_IO_Error", "Last_SQL_Errno", "Last_SQL_Error",
-            "Replicate_Ignore_Server_Ids", "Master_Server_Id", "Master_UUID",
-            "Master_Info_File", "SQL_Delay", "SQL_Remaining_Delay",
-            "Slave_SQL_Running_State", "Master_Retry_Count", "Master_Bind",
-            "Last_IO_Error_Timestamp", "Last_SQL_Error_Timestamp",
-            "Master_SSL_Crl", "Master_SSL_Crlpath",
-            "Retrieved_Gtid_Set", "Executed_Gtid_Set", "Auto_Position",
-            "Replicate_Rewrite_DB", "Channel_Name", "Master_TLS_Version",
-            "Master_public_key_path", "Get_master_public_key", "Network_Namespace",
-        ]
-        return dict(zip(fields, out.split("\t")))
-    except Exception:
-        return None
-
-
-def snapshot_info() -> dict | None:
-    latest = ROOT / "snapshots" / "latest.sql.gz"
-    if not latest.exists():
-        return None
-    stat = latest.stat()
-    return {
-        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-        "size_mb": round(stat.st_size / (1024 * 1024), 2),
-    }
-
-
-def container_logs(name: str, lines: int = 100) -> str:
-    try:
-        return subprocess.check_output(
-            ["docker", "logs", "--tail", str(lines), name],
-            stderr=subprocess.STDOUT, timeout=10,
-        ).decode(errors="replace")
+        t0 = time.time()
+        with urllib.request.urlopen(url, timeout=15) as r:
+            data = json.loads(r.read())
+        return {**agent, "status": "online",  "data": data,
+                "error": None, "latency_ms": int((time.time() - t0) * 1000)}
     except Exception as e:
-        return f"Erro ao obter logs: {e}"
+        return {**agent, "status": "offline", "data": None,
+                "error": str(e), "latency_ms": None}
 
 
-# ─── data ────────────────────────────────────────────────────────────────────
+def fetch_all() -> dict:
+    agents = load_agents()
+    results = [None] * len(agents)
 
-def get_data() -> dict:
-    env = load_env()
-    password = env.get("BASE_MYSQL_ROOT_PASSWORD", "")
+    def _fetch(i, ag):
+        results[i] = fetch_agent(ag)
 
-    registry_file = ROOT / "registry" / "slots.json"
-    slots_raw = json.loads(registry_file.read_text()) if registry_file.exists() else []
+    threads = [threading.Thread(target=_fetch, args=(i, ag)) for i, ag in enumerate(agents)]
+    for t in threads: t.start()
+    for t in threads: t.join()
 
-    now = datetime.now().astimezone()
-
-    def enrich_slot(s):
-        name = s["slot_name"]
-        st = docker_status(name)
-        expires = datetime.fromisoformat(s["expires_at"])
-        delta = expires - now
-        if delta.total_seconds() < 0:
-            remaining = "EXPIRADO"
-            expired = True
-            alert = "expired"
-        elif delta.total_seconds() < 3600:
-            h = int(delta.total_seconds() // 3600)
-            m = int((delta.total_seconds() % 3600) // 60)
-            remaining = f"{h}h {m}m"
-            expired = False
-            alert = "critical"
-        elif delta.total_seconds() < 7200:
-            h = int(delta.total_seconds() // 3600)
-            m = int((delta.total_seconds() % 3600) // 60)
-            remaining = f"{h}h {m}m"
-            expired = False
-            alert = "warning"
-        else:
-            h = int(delta.total_seconds() // 3600)
-            m = int((delta.total_seconds() % 3600) // 60)
-            remaining = f"{h}h {m}m"
-            expired = False
-            alert = "ok"
-
-        stats = docker_stats(name) if st == "running" else None
-        metrics = mysql_metrics(name, password) if st == "running" else None
-        repl = replica_status(name, password) if st == "running" else None
-
-        return {
-            **s,
-            "container_status": st,
-            "remaining": remaining,
-            "expired": expired,
-            "alert": alert,
-            "stats": stats,
-            "metrics": metrics,
-            "replica": repl,
-        }
-
-    # enrich slots in parallel
-    results = [None] * len(slots_raw)
-    threads = []
-    for i, s in enumerate(slots_raw):
-        def _enrich(idx, slot):
-            results[idx] = enrich_slot(slot)
-        t = threading.Thread(target=_enrich, args=(i, s))
-        threads.append(t)
-        t.start()
-    for t in threads:
-        t.join()
-
-    base_st = docker_status("mysql-hml-base")
-    prd_st = docker_status("mysql-hml-prd")
-
-    base_repl = base_replica_status(password) if base_st == "running" else None
+    online  = [r for r in results if r["status"] == "online"]
+    total_slots = sum(len(r["data"]["slots"]) for r in online)
+    expiring    = sum(
+        1 for r in online
+        for s in r["data"]["slots"]
+        if s.get("alert") in ("critical", "warning", "expired")
+    )
+    repl_errors = sum(
+        1 for r in online
+        if r["data"].get("base_repl", {}).get("last_io_error") or
+           r["data"].get("base_repl", {}).get("last_sql_error")
+    )
 
     return {
-        "slots": results,
-        "base": base_st,
-        "prd": prd_st,
-        "base_stats": docker_stats("mysql-hml-base") if base_st == "running" else None,
-        "prd_stats": docker_stats("mysql-hml-prd") if prd_st == "running" else None,
-        "base_repl": base_repl,
-        "snapshot": snapshot_info(),
-        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "servers": results,
+        "summary": {
+            "total":        len(results),
+            "online":       len(online),
+            "total_slots":  total_slots,
+            "expiring":     expiring,
+            "repl_errors":  repl_errors,
+        },
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
-# ─── HTML ────────────────────────────────────────────────────────────────────
+def proxy(agent_url: str, path: str, method="GET", body: bytes = None):
+    url = agent_url + path
+    req = urllib.request.Request(url, data=body, method=method)
+    if body:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except Exception as e:
+        return 503, json.dumps({"error": str(e)}).encode()
+
+
+# ─── HTML ─────────────────────────────────────────────────────────────────────
 
 PAGE = """<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HML Slots</title>
+<title>HML Central</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2"></script>
 <style>
 :root{
-  --bg:#0d0d0d;
-  --surface:#161616;
-  --surface-2:#1e1e1e;
-  --border:#2a2a2a;
-  --border-2:#3a3a3a;
-  --text:#f2f2f2;
-  --muted:#888;
-  --accent:#4ade80;
-  --accent-dim:rgba(74,222,128,.12);
-  --danger:#f87171;
-  --danger-dim:rgba(248,113,113,.1);
-  --warning:#fbbf24;
-  --warning-dim:rgba(251,191,36,.1);
-  --info:#60a5fa;
-  --info-dim:rgba(96,165,250,.1);
-  --radius:10px;
-  --radius-sm:6px;
+  --bg:#0d0d0d;--surface:#161616;--surface-2:#1e1e1e;
+  --border:#2a2a2a;--border-2:#3a3a3a;
+  --text:#f2f2f2;--muted:#888;
+  --accent:#4ade80;--accent-dim:rgba(74,222,128,.12);
+  --danger:#f87171;--danger-dim:rgba(248,113,113,.1);
+  --warning:#fbbf24;--warning-dim:rgba(251,191,36,.1);
+  --info:#60a5fa;--info-dim:rgba(96,165,250,.1);
+  --radius:10px;--radius-sm:6px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;min-height:100vh}
-a{color:inherit}
 
-/* nav */
 nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:52px;background:var(--surface);border-bottom:1px solid var(--border)}
 .nav-brand{font-weight:600;font-size:15px;letter-spacing:-.01em}
 .nav-right{display:flex;align-items:center;gap:16px}
 .ts{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
-main{padding:24px;max-width:1400px;margin:0 auto}
+main{padding:24px;max-width:1600px;margin:0 auto}
 
-/* cards */
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:28px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:24px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;transition:border-color .15s,box-shadow .15s}
 .card:hover{border-color:var(--border-2);box-shadow:0 4px 20px rgba(0,0,0,.5)}
 .card-label{font-size:12px;font-weight:500;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:8px}
-.card-value{font-size:1.25rem;font-weight:700;line-height:1}
-.card-sub{font-size:12px;color:var(--muted);margin-top:5px}
-.card-stats{font-size:12px;color:var(--muted);margin-top:6px;display:flex;gap:10px}
+.card-value{font-size:1.3rem;font-weight:700;line-height:1}
+.card-sub{font-size:12px;color:var(--muted);margin-top:4px}
 
-/* section */
-section{margin-bottom:28px}
-section h2{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:10px}
-section h2::after{content:'';flex:1;height:1px;background:var(--border)}
+.server-section{margin-bottom:20px}
+.server-header{display:flex;align-items:center;gap:10px;padding:10px 4px;cursor:pointer;user-select:none;border-radius:var(--radius-sm)}
+.server-header:hover{background:var(--surface-2)}
+.server-name{font-weight:600;font-size:13px}
+.server-header::after{content:'';flex:1;height:1px;background:var(--border);margin-left:8px}
+.toggle-icon{transition:transform .2s;font-size:13px;color:var(--muted)}
+.server-header.collapsed .toggle-icon{transform:rotate(-90deg)}
+.server-body{padding:0 4px 8px}
+.server-body.hidden{display:none}
 
-/* table */
+.repl-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:14px}
+.repl-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px}
+.repl-card-label{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:6px}
+.repl-card-value{font-size:1.1rem;font-weight:700}
+
 .table-wrap{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--border)}
-table{width:100%;border-collapse:collapse;background:var(--surface);min-width:900px}
+table{width:100%;border-collapse:collapse;background:var(--surface);min-width:860px}
 th{text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg);white-space:nowrap}
-td{padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
+td{padding:11px 14px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:var(--surface-2)}
 
-/* badges */
 .badge{display:inline-block;padding:2px 8px;border-radius:var(--radius-sm);font-size:11px;font-weight:600;white-space:nowrap}
 .b-green{background:var(--accent-dim);color:var(--accent);border:1px solid rgba(74,222,128,.2)}
 .b-red{background:var(--danger-dim);color:var(--danger);border:1px solid rgba(248,113,113,.2)}
@@ -358,38 +178,34 @@ tr:hover td{background:var(--surface-2)}
 .b-gray{background:var(--surface-2);color:var(--muted);border:1px solid var(--border)}
 .b-blue{background:var(--info-dim);color:var(--info);border:1px solid rgba(96,165,250,.2)}
 
-/* alerts */
 .alert-expired td{opacity:.45}
-.alert-critical td:nth-child(7){color:var(--danger);font-weight:700}
-.alert-warning td:nth-child(7){color:var(--warning);font-weight:600}
+.alert-critical td:nth-child(6){color:var(--danger);font-weight:700}
+.alert-warning  td:nth-child(6){color:var(--warning);font-weight:600}
 
-/* metrics */
 .metrics{font-size:12px;color:var(--muted);line-height:1.8}
 .metrics b{color:var(--text)}
 .repl-ok{color:var(--accent)}
 .repl-err{color:var(--danger)}
 .none{color:var(--border-2);font-style:italic;font-size:12px}
 
-/* buttons */
 .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:background .15s,border-color .15s}
 .btn:hover:not(:disabled){background:#2a2a2a;border-color:var(--border-2)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .btn-accent{background:var(--accent);border-color:var(--accent);color:#0d0d0d;font-weight:600}
 .btn-accent:hover:not(:disabled){background:#22c55e;border-color:#22c55e;color:#0d0d0d}
-.btn-danger{background:var(--danger-dim);border-color:rgba(248,113,113,.25);color:var(--danger)}
-.btn-danger:hover:not(:disabled){background:rgba(248,113,113,.18);border-color:rgba(248,113,113,.4)}
 .btn-warning{background:var(--warning-dim);border-color:rgba(251,191,36,.25);color:var(--warning)}
-.btn-warning:hover:not(:disabled){background:rgba(251,191,36,.18);border-color:rgba(251,191,36,.4)}
-.actions{display:flex;gap:6px;flex-wrap:wrap}
+.btn-warning:hover:not(:disabled){background:rgba(251,191,36,.18)}
+.btn-sm{padding:4px 9px;font-size:12px}
+.actions{display:flex;gap:5px;flex-wrap:wrap}
 
-/* job toast */
+.offline-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:var(--radius-sm);background:var(--danger-dim);border:1px solid rgba(248,113,113,.2);color:var(--danger);font-size:13px}
+
 #job-toast{position:fixed;bottom:24px;right:24px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;max-width:420px;width:100%;z-index:100;display:none;box-shadow:0 8px 32px rgba(0,0,0,.6)}
 #job-toast .job-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-size:13px;font-weight:600}
 #job-toast pre{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:12px;max-height:200px;overflow-y:auto;color:var(--muted);white-space:pre-wrap;word-break:break-all}
-#job-close{background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:0 4px}
+#job-close{background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem}
 #job-close:hover{color:var(--text)}
 
-/* log modal */
 #log-modal{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;display:none;align-items:flex-end;justify-content:center}
 #log-modal.open{display:flex}
 #log-panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius) var(--radius) 0 0;width:100%;max-width:960px;max-height:70vh;display:flex;flex-direction:column}
@@ -406,59 +222,24 @@ tr:hover td{background:var(--surface-2)}
 <body>
 
 <nav>
-  <span class="nav-brand">HML Slots</span>
+  <span class="nav-brand">HML Central</span>
   <div class="nav-right">
     <span class="ts" id="clock"></span>
     <span class="ts" id="ts"></span>
-    <button class="btn btn-accent" onclick="doRefresh()"><i class="ph ph-arrows-clockwise"></i> Voltar Base</button>
   </div>
 </nav>
 
 <main>
-  <div class="cards" id="cards">
-    <div class="card"><div class="card-label">Slots ativos</div><div class="card-value" id="c-slots">—</div></div>
-    <div class="card"><div class="card-label">mysql-hml-base</div><div class="card-value" id="c-base">—</div><div class="card-stats" id="c-base-stats"></div></div>
-    <div class="card"><div class="card-label">mysql-hml-prd</div><div class="card-value" id="c-prd">—</div><div class="card-stats" id="c-prd-stats"></div></div>
-    <div class="card"><div class="card-label">Último snapshot</div><div class="card-value" id="c-snap" style="font-size:.95rem">—</div><div class="card-sub" id="c-snap-size"></div></div>
+  <div class="cards">
+    <div class="card"><div class="card-label">Servidores</div><div class="card-value" id="g-servers">—</div><div class="card-sub" id="g-servers-sub"></div></div>
+    <div class="card"><div class="card-label">Slots ativos</div><div class="card-value" id="g-slots">—</div></div>
+    <div class="card"><div class="card-label">Expirando</div><div class="card-value" id="g-expiring">—</div></div>
+    <div class="card"><div class="card-label">Erros replicação</div><div class="card-value" id="g-repl-err">—</div></div>
   </div>
 
-  <section>
-    <h2>Replicação PRD → Base</h2>
-    <div id="repl-panel" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:4px">
-      <div class="card"><div class="card-label">IO Thread</div><div class="card-value" id="r-io">—</div></div>
-      <div class="card"><div class="card-label">SQL Thread</div><div class="card-value" id="r-sql">—</div></div>
-      <div class="card"><div class="card-label">Lag</div><div class="card-value" id="r-lag">—</div><div class="card-sub" id="r-lag-sub"></div></div>
-      <div class="card"><div class="card-label">Fonte</div><div class="card-value" id="r-source" style="font-size:.85rem;word-break:break-all">—</div></div>
-      <div class="card" id="r-error-card" style="display:none"><div class="card-label">Erro</div><div class="card-sub" id="r-error" style="color:var(--danger);font-size:.75rem"></div></div>
-    </div>
-  </section>
-
-  <section>
-    <h2>Slots</h2>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Slot</th>
-            <th>Owner</th>
-            <th>Porta</th>
-            <th>Container</th>
-            <th>CPU / Mem</th>
-            <th>MySQL</th>
-            <th>Expira / Restante</th>
-            <th>Replicação</th>
-            <th>Ações</th>
-          </tr>
-        </thead>
-        <tbody id="slots-body">
-          <tr><td colspan="9" style="text-align:center;color:#334155;padding:32px">Carregando...</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
+  <div id="servers-container"></div>
 </main>
 
-<!-- job toast -->
 <div id="job-toast">
   <div class="job-header">
     <span id="job-label">—</span>
@@ -471,7 +252,6 @@ tr:hover td{background:var(--surface-2)}
   </div>
 </div>
 
-<!-- log modal -->
 <div id="log-modal" onclick="closeLog(event)">
   <div id="log-panel">
     <div id="log-header">
@@ -484,151 +264,173 @@ tr:hover td{background:var(--surface-2)}
 
 <script>
 const badge = (st) => {
-  const map = {running:'b-green',exited:'b-red','not found':'b-gray',paused:'b-yellow'};
+  const map = {running:'b-green',exited:'b-red','not found':'b-gray',paused:'b-yellow',online:'b-green',offline:'b-red'};
   return `<span class="badge ${map[st]||'b-gray'}">${st}</span>`;
 };
 
-const repl = (r) => {
-  if (!r) return '<span class="none">—</span>';
-  const io = r.Slave_IO_Running || '?';
-  const sql = r.Slave_SQL_Running || '?';
-  const lag = r.Seconds_Behind_Master;
-  const err = r.Last_IO_Error || r.Last_SQL_Error || '';
-  return `<span style="font-size:.73rem">
-    IO <span class="${io==='Yes'?'repl-ok':'repl-err'}">${io}</span>
-    SQL <span class="${sql==='Yes'?'repl-ok':'repl-err'}">${sql}</span>
-    ${lag !== undefined ? `Lag <b>${lag}s</b>` : ''}
-    ${err ? `<br><span class="repl-err" style="font-size:.68rem">${err.slice(0,60)}</span>` : ''}
-  </span>`;
-};
-
-const statsHtml = (s) => {
-  if (!s) return '<span class="none">—</span>';
-  return `<span style="font-size:.73rem"><b>${s.cpu}</b> &nbsp; ${s.mem}</span>`;
-};
+const statsHtml = (s) => s
+  ? `<span style="font-size:12px"><b>${s.cpu}</b> &nbsp;${s.mem}</span>`
+  : '<span class="none">—</span>';
 
 const metricsHtml = (m) => {
   if (!m) return '<span class="none">—</span>';
-  const uptime = m.Uptime ? `${Math.round(m.Uptime/60)}m` : '—';
-  const conns = m.Threads_connected || '—';
-  const qps = m.Questions || m.Queries || '—';
-  return `<div class="metrics">uptime <b>${uptime}</b><br>conns <b>${conns}</b><br>queries <b>${qps}</b></div>`;
+  const up = m.Uptime ? Math.round(m.Uptime/60)+'m' : '—';
+  return `<div class="metrics">up <b>${up}</b><br>conn <b>${m.Threads_connected||'—'}</b><br>q <b>${m.Questions||m.Queries||'—'}</b></div>`;
+};
+
+const replCellHtml = (r) => {
+  if (!r) return '<span class="none">—</span>';
+  const io = r.Slave_IO_Running || r.io_running || '?';
+  const sql = r.Slave_SQL_Running || r.sql_running || '?';
+  const lag = r.Seconds_Behind_Master || r.lag;
+  const err = r.Last_IO_Error || r.last_io_error || r.Last_SQL_Error || r.last_sql_error || '';
+  return `<span style="font-size:12px">IO <span class="${io==='Yes'?'repl-ok':'repl-err'}">${io}</span> SQL <span class="${sql==='Yes'?'repl-ok':'repl-err'}">${sql}</span>${lag!==undefined?` Lag <b>${lag}s</b>`:''}${err?`<br><span class="repl-err" style="font-size:11px">${err.slice(0,50)}</span>`:''}</span>`;
 };
 
 function renderRepl(r) {
-  if (!r) {
-    ['r-io','r-sql','r-lag','r-source'].forEach(id => {
-      document.getElementById(id).innerHTML = '<span class="none">base offline</span>';
-    });
-    return;
+  if (!r || !r.configured) {
+    return `
+      <div class="repl-cards">
+        <div class="repl-card"><div class="repl-card-label">IO Thread</div><div><span class="badge b-gray">não configurado</span></div></div>
+        <div class="repl-card"><div class="repl-card-label">SQL Thread</div><div><span class="badge b-gray">não configurado</span></div></div>
+        <div class="repl-card"><div class="repl-card-label">Lag</div><div class="repl-card-value none">—</div></div>
+        <div class="repl-card"><div class="repl-card-label">Fonte</div><div style="font-size:11px;color:var(--muted)">execute make setup-replication</div></div>
+      </div>`;
   }
-  if (!r.configured) {
-    ['r-io','r-sql'].forEach(id => {
-      document.getElementById(id).innerHTML = '<span class="badge b-gray">não configurado</span>';
-    });
-    document.getElementById('r-lag').innerHTML = '<span class="none">—</span>';
-    document.getElementById('r-source').innerHTML = '<span class="none">execute make setup-replication</span>';
-    return;
-  }
-
-  const ioOk = r.io_running === 'Yes';
+  const ioOk  = r.io_running  === 'Yes';
   const sqlOk = r.sql_running === 'Yes';
-  document.getElementById('r-io').innerHTML =
-    `<span class="badge ${ioOk ? 'b-green' : 'b-red'}">${r.io_running}</span>`;
-  document.getElementById('r-sql').innerHTML =
-    `<span class="badge ${sqlOk ? 'b-green' : 'b-red'}">${r.sql_running}</span>`;
-
-  const lag = r.lag_int;
-  let lagColor = 'var(--accent)';
-  let lagSub = 'sincronizado';
-  if (lag === null) { lagColor = 'var(--muted)'; lagSub = ''; }
-  else if (lag > 60)  { lagColor = 'var(--danger)';  lagSub = 'lag crítico'; }
-  else if (lag > 10)  { lagColor = 'var(--warning)'; lagSub = 'lag moderado'; }
-  document.getElementById('r-lag').innerHTML =
-    `<span style="color:${lagColor};font-weight:700">${lag !== null ? lag + 's' : '—'}</span>`;
-  document.getElementById('r-lag-sub').textContent = lagSub;
-
-  document.getElementById('r-source').textContent =
-    r.source_host ? `${r.source_host}:${r.source_port}` : '—';
-
-  const err = r.last_io_error || r.last_sql_error || '';
-  const errCard = document.getElementById('r-error-card');
-  errCard.style.display = err ? '' : 'none';
-  if (err) document.getElementById('r-error').textContent = err;
+  const lag   = r.lag_int;
+  const lagColor = lag === null ? 'var(--muted)' : lag > 60 ? 'var(--danger)' : lag > 10 ? 'var(--warning)' : 'var(--accent)';
+  const err   = r.last_io_error || r.last_sql_error || '';
+  return `
+    <div class="repl-cards">
+      <div class="repl-card"><div class="repl-card-label">IO Thread</div><div>${badge(ioOk?'running':'stopped')}</div></div>
+      <div class="repl-card"><div class="repl-card-label">SQL Thread</div><div>${badge(sqlOk?'running':'stopped')}</div></div>
+      <div class="repl-card"><div class="repl-card-label">Lag</div><div class="repl-card-value" style="color:${lagColor}">${lag!==null?lag+'s':'—'}</div></div>
+      <div class="repl-card"><div class="repl-card-label">Fonte</div><div style="font-size:12px;color:var(--muted)">${r.source_host||'—'}${r.source_port?':'+r.source_port:''}</div></div>
+      ${err ? `<div class="repl-card" style="grid-column:1/-1"><div class="repl-card-label">Erro</div><div style="font-size:12px;color:var(--danger)">${err}</div></div>` : ''}
+    </div>`;
 }
 
-function render(data) {
-  document.getElementById('ts').textContent = '· refresh ' + data.generated_at.slice(11);
-  renderRepl(data.base_repl);
-  document.getElementById('c-slots').textContent = data.slots.length;
-  document.getElementById('c-base').innerHTML = badge(data.base);
-  document.getElementById('c-prd').innerHTML = badge(data.prd);
+function renderServer(srv) {
+  const d = srv.data;
+  const sid = 'srv-' + srv.name.replace(/[^a-z0-9]/gi, '-');
 
-  const bs = data.base_stats;
-  document.getElementById('c-base-stats').innerHTML = bs
-    ? `<span>CPU ${bs.cpu}</span><span>${bs.mem}</span>` : '';
-
-  const ps = data.prd_stats;
-  document.getElementById('c-prd-stats').innerHTML = ps
-    ? `<span>CPU ${ps.cpu}</span><span>${ps.mem}</span>` : '';
-
-  const snap = data.snapshot;
-  document.getElementById('c-snap').textContent = snap ? snap.modified : '—';
-  document.getElementById('c-snap-size').textContent = snap ? snap.size_mb + ' MB' : '';
-
-  const tbody = document.getElementById('slots-body');
-  if (!data.slots.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:32px">Nenhum slot ativo</td></tr>';
-    return;
+  if (srv.status === 'offline') {
+    return `
+      <div class="server-section">
+        <div class="server-header" onclick="toggleServer('${sid}')">
+          <i class="ph ph-caret-down toggle-icon" id="${sid}-icon"></i>
+          <span class="server-name">${srv.name}</span>
+          ${badge('offline')}
+          <span style="font-size:12px;color:var(--muted)">${srv.error||''}</span>
+        </div>
+      </div>`;
   }
 
-  tbody.innerHTML = data.slots.map(s => {
+  const slots = d.slots || [];
+  const snap  = d.snapshot;
+
+  const rows = slots.length ? slots.map(s => {
     const expStr = s.expires_at.slice(0,19).replace('T',' ');
-    const remColor = s.alert === 'expired' ? '#f87171' : s.alert === 'critical' ? '#f87171' : s.alert === 'warning' ? '#fbbf24' : '#4ade80';
+    const remColor = s.alert==='expired'||s.alert==='critical' ? 'var(--danger)' : s.alert==='warning' ? 'var(--warning)' : 'var(--accent)';
     return `<tr class="alert-${s.alert}">
       <td><strong>${s.slot_name}</strong></td>
       <td>${s.owner}</td>
       <td><span class="badge b-blue">${s.port}</span></td>
       <td>${badge(s.container_status)}</td>
       <td>${statsHtml(s.stats)}</td>
-      <td>${metricsHtml(s.metrics)}</td>
-      <td><span style="font-size:.73rem;color:#64748b">${expStr}</span><br><span style="color:${remColor};font-weight:700;font-size:.8rem">${s.remaining}</span></td>
-      <td>${repl(s.replica)}</td>
+      <td><span style="font-size:12px;color:var(--muted)">${expStr}</span><br><span style="color:${remColor};font-weight:700;font-size:12px">${s.remaining}</span></td>
+      <td>${replCellHtml(s.replica)}</td>
       <td>
         <div class="actions">
-          <button class="btn" onclick="doLogs('${s.slot_name}')"><i class="ph ph-terminal"></i> Logs</button>
-          <button class="btn btn-warning" onclick="doRestart('${s.slot_name}', this)"><i class="ph ph-arrows-clockwise"></i> Reiniciar</button>
+          <button class="btn btn-sm" onclick="doLogs('${srv.url}','${s.slot_name}')"><i class="ph ph-terminal"></i> Logs</button>
+          <button class="btn btn-warning btn-sm" onclick="doRestart('${srv.url}','${s.slot_name}',this)"><i class="ph ph-arrows-clockwise"></i> Restart</button>
         </div>
       </td>
     </tr>`;
-  }).join('');
+  }).join('') : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:28px">Nenhum slot ativo</td></tr>`;
+
+  return `
+    <div class="server-section">
+      <div class="server-header" onclick="toggleServer('${sid}')">
+        <i class="ph ph-caret-down toggle-icon" id="${sid}-icon"></i>
+        <span class="server-name">${srv.name}</span>
+        ${badge('online')}
+        <span class="badge b-gray">${slots.length} slot${slots.length!==1?'s':''}</span>
+        <span style="font-size:12px;color:var(--muted)">base ${badge(d.base)} &nbsp; prd ${badge(d.prd)}</span>
+        <span style="font-size:12px;color:var(--muted)">${snap?'snapshot '+snap.modified+' · '+snap.size_mb+'MB':''}</span>
+        <span style="font-size:12px;color:var(--muted)">${srv.latency_ms!==null?srv.latency_ms+'ms':''}</span>
+        <button class="btn btn-accent btn-sm" style="margin-left:8px" onclick="event.stopPropagation();doRefresh('${srv.url}','${srv.name}')"><i class="ph ph-arrows-clockwise"></i> Voltar Base</button>
+      </div>
+      <div class="server-body" id="${sid}-body">
+        ${renderRepl(d.base_repl)}
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Slot</th><th>Owner</th><th>Porta</th><th>Container</th>
+              <th>CPU / Mem</th><th>Expira / Restante</th><th>Replicação</th><th>Ações</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+}
+
+function render(data) {
+  const s = data.summary;
+  document.getElementById('ts').textContent  = '· ' + data.generated_at.slice(11);
+  document.getElementById('g-servers').innerHTML = `<span>${s.online}</span><span style="color:var(--muted);font-size:.9rem"> / ${s.total}</span>`;
+  document.getElementById('g-servers-sub').textContent = s.online < s.total ? `${s.total-s.online} offline` : 'todos online';
+  document.getElementById('g-slots').textContent    = s.total_slots;
+  document.getElementById('g-expiring').innerHTML   = s.expiring  ? `<span style="color:var(--warning)">${s.expiring}</span>`  : '0';
+  document.getElementById('g-repl-err').innerHTML   = s.repl_errors ? `<span style="color:var(--danger)">${s.repl_errors}</span>` : '0';
+
+  const container = document.getElementById('servers-container');
+  // preserve collapsed state
+  const collapsed = new Set(
+    [...container.querySelectorAll('.server-header.collapsed')]
+      .map(h => h.closest('.server-section')?.querySelector('.toggle-icon')?.id)
+  );
+  container.innerHTML = data.servers.map(renderServer).join('');
+  collapsed.forEach(iconId => {
+    const icon = document.getElementById(iconId);
+    if (icon) {
+      icon.closest('.server-header').classList.add('collapsed');
+      const bodyId = iconId.replace('-icon', '-body');
+      const body = document.getElementById(bodyId);
+      if (body) body.classList.add('hidden');
+    }
+  });
+}
+
+function toggleServer(sid) {
+  const icon = document.getElementById(sid + '-icon');
+  const body = document.getElementById(sid + '-body');
+  if (!icon || !body) return;
+  icon.closest('.server-header').classList.toggle('collapsed');
+  body.classList.toggle('hidden');
 }
 
 async function load() {
   try {
     const r = await fetch('/api');
-    const data = await r.json();
-    render(data);
-  } catch(e) {
-    console.error('load error', e);
-  }
+    render(await r.json());
+  } catch(e) { console.error(e); }
 }
 
-// relógio ao vivo
-function updateClock() {
-  const now = new Date();
-  const pad = n => String(n).padStart(2, '0');
-  const el = document.getElementById('clock');
-  if (el) el.textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-}
-updateClock();
-setInterval(updateClock, 1000);
-
-// auto-refresh
 setInterval(load, 30000);
 load();
 
-// ── actions ────────────────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date(), pad = n => String(n).padStart(2,'0');
+  const el = document.getElementById('clock');
+  if (el) el.textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+updateClock(); setInterval(updateClock, 1000);
+
+// ── actions ──────────────────────────────────────────────────────────────────
 
 let _pollTimer = null;
 
@@ -645,14 +447,14 @@ function closeToast() {
   if (_pollTimer) clearInterval(_pollTimer);
 }
 
-function pollJob(job_id) {
+function pollJob(agentUrl, jobId) {
   if (_pollTimer) clearInterval(_pollTimer);
   _pollTimer = setInterval(async () => {
-    const r = await fetch('/action/status?job_id=' + job_id);
+    const r = await fetch(`/action/status?agent=${encodeURIComponent(agentUrl)}&job_id=${jobId}`);
     const d = await r.json();
-    document.getElementById('job-output').textContent = d.output || '';
     const pre = document.getElementById('job-output');
-    pre.scrollTop = pre.scrollHeight;
+    pre.textContent = d.output || '';
+    pre.scrollTop   = pre.scrollHeight;
     if (d.status !== 'running') {
       clearInterval(_pollTimer);
       document.getElementById('job-spinner').style.display = 'none';
@@ -664,44 +466,42 @@ function pollJob(job_id) {
   }, 1000);
 }
 
-async function doRefresh() {
-  showToast('↺ Voltar Base (make refresh)');
-  const r = await fetch('/action/refresh', {method:'POST'});
+async function doRefresh(agentUrl, serverName) {
+  showToast(`↺ Voltar Base — ${serverName}`);
+  const r = await fetch(`/action/refresh?agent=${encodeURIComponent(agentUrl)}`, {method:'POST'});
   const d = await r.json();
-  pollJob(d.job_id);
+  pollJob(agentUrl, d.job_id);
 }
 
-async function doRestart(slot, btn) {
+async function doRestart(agentUrl, slot, btn) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>';
   try {
-    await fetch('/action/restart', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({slot}),
+    await fetch(`/action/restart?agent=${encodeURIComponent(agentUrl)}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({slot}),
     });
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '↺ Reiniciar';
+    btn.innerHTML = '<i class="ph ph-arrows-clockwise"></i> Restart';
     load();
   }
 }
 
-async function doLogs(slot) {
-  document.getElementById('log-title').textContent = 'Logs — ' + slot;
-  document.getElementById('log-pre').textContent = 'Carregando...';
+async function doLogs(agentUrl, slot) {
+  document.getElementById('log-title').textContent = `Logs — ${slot}`;
+  document.getElementById('log-pre').textContent   = 'Carregando...';
   document.getElementById('log-modal').classList.add('open');
-  const r = await fetch('/logs?slot=' + slot);
+  const r = await fetch(`/logs?agent=${encodeURIComponent(agentUrl)}&slot=${slot}`);
   const d = await r.json();
   document.getElementById('log-pre').textContent = d.logs || '(sem logs)';
-  const body = document.getElementById('log-body');
-  body.scrollTop = body.scrollHeight;
+  document.getElementById('log-body').scrollTop = document.getElementById('log-body').scrollHeight;
 }
 
 function closeLog(e) {
-  if (!e || e.target === document.getElementById('log-modal') || e.currentTarget === document.getElementById('log-close')) {
+  if (!e || e.target===document.getElementById('log-modal') || e.currentTarget===document.getElementById('log-close'))
     document.getElementById('log-modal').classList.remove('open');
-  }
 }
 </script>
 </body>
@@ -710,13 +510,22 @@ function closeLog(e) {
 
 # ─── HTTP handler ─────────────────────────────────────────────────────────────
 
-def parse_qs(query: str) -> dict:
-    params = {}
-    for part in query.split("&"):
-        if "=" in part:
-            k, _, v = part.partition("=")
-            params[k] = v
-    return params
+def parse_qs(q: str) -> dict:
+    out = {}
+    for p in q.split("&"):
+        if "=" in p:
+            k, _, v = p.partition("=")
+            from urllib.parse import unquote
+            out[k] = unquote(v)
+    return out
+
+
+def agent_url_for(qs: dict) -> str | None:
+    agent = qs.get("agent", "")
+    if agent:
+        return agent
+    agents = load_agents()
+    return agents[0]["url"] if agents else None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -733,21 +542,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        qs = parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+        qs   = parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
 
         if path == "/api":
-            self.send_json(200, get_data())
+            self.send_json(200, fetch_all())
 
         elif path == "/action/status":
-            job_id = qs.get("job_id", "")
-            with _jobs_lock:
-                job = _jobs.get(job_id, {"status": "not found", "output": ""})
-            self.send_json(200, job)
+            url = agent_url_for(qs)
+            if not url:
+                self.send_json(404, {"error": "agent not found"})
+                return
+            code, body = proxy(url, f"/action/status?job_id={qs.get('job_id','')}")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
 
         elif path == "/logs":
-            slot = qs.get("slot", "")
-            logs = container_logs(slot) if slot else "slot não informado"
-            self.send_json(200, {"logs": logs})
+            url = agent_url_for(qs)
+            if not url:
+                self.send_json(404, {"error": "agent not found"})
+                return
+            code, body = proxy(url, f"/logs?slot={qs.get('slot','')}")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
 
         else:
             body = PAGE.encode()
@@ -758,34 +580,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_POST(self):
-        path = self.path.split("?")[0]
+        path   = self.path.split("?")[0]
+        qs     = parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length)) if length else {}
+        body   = self.rfile.read(length) if length else b""
+
+        url = agent_url_for(qs)
+        if not url:
+            self.send_json(404, {"error": "agent not found"})
+            return
 
         if path == "/action/refresh":
-            job_id = start_job("make refresh", ["make", "refresh"])
-            self.send_json(200, {"job_id": job_id})
-
+            code, resp = proxy(url, "/action/refresh", "POST", body or b"{}")
         elif path == "/action/restart":
-            slot = body.get("slot", "")
-            try:
-                subprocess.run(["docker", "restart", slot],
-                               capture_output=True, timeout=30)
-                self.send_json(200, {"ok": True})
-            except Exception as e:
-                self.send_json(500, {"ok": False, "error": str(e)})
-
+            code, resp = proxy(url, "/action/restart", "POST", body)
         else:
             self.send_json(404, {"error": "not found"})
+            return
 
-
-class ThreadedServer(http.server.ThreadingHTTPServer):
-    pass
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(resp))
+        self.end_headers()
+        self.wfile.write(resp)
 
 
 if __name__ == "__main__":
-    server = ThreadedServer(("0.0.0.0", PORT), Handler)
-    print(f"Dashboard em http://localhost:{PORT}")
+    agents = load_agents()
+    print(f"HML Central Dashboard em http://localhost:{PORT}")
+    print(f"Agents configurados ({len(agents)}):")
+    for a in agents:
+        print(f"  {a['name']} → {a['url']}")
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
