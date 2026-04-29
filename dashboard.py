@@ -586,7 +586,6 @@ function renderServer(srv) {
 
 function render(data) {
   const s = data.summary;
-  document.getElementById('ts').textContent  = '· ' + data.generated_at.slice(11);
   document.getElementById('g-servers').innerHTML = `<span>${s.online}</span><span style="color:var(--muted);font-size:.9rem"> / ${s.total}</span>`;
   document.getElementById('g-servers-sub').textContent = s.online < s.total ? `${s.total-s.online} offline` : 'todos online';
   document.getElementById('g-slots').textContent    = s.total_slots;
