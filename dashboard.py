@@ -402,7 +402,10 @@ const replCellHtml = (r) => {
   return `<span style="font-size:12px">IO <span class="${io==='Yes'?'repl-ok':'repl-err'}">${io}</span> SQL <span class="${sql==='Yes'?'repl-ok':'repl-err'}">${sql}</span>${lag!==undefined?` Lag <b>${lag}s</b>`:''}${err?`<br><span class="repl-err" style="font-size:11px">${err.slice(0,50)}</span>`:''}</span>`;
 };
 
-function renderRepl(r) {
+function renderRepl(r, agentUrl) {
+  const logsBtn = agentUrl
+    ? `<button class="btn btn-sm" style="margin-left:auto" onclick="doLogs('${agentUrl}','mysql-hml-base')"><i class="ph ph-terminal"></i> Logs da réplica</button>`
+    : '';
   if (!r || !r.configured) {
     return `
       <div class="repl-cards">
@@ -410,6 +413,7 @@ function renderRepl(r) {
         <div class="repl-card"><div class="repl-card-label">SQL Thread</div><div><span class="badge b-gray">não configurado</span></div></div>
         <div class="repl-card"><div class="repl-card-label">Lag</div><div class="repl-card-value none">—</div></div>
         <div class="repl-card"><div class="repl-card-label">Fonte</div><div style="font-size:11px;color:var(--muted)">execute make setup-replication</div></div>
+        ${agentUrl ? `<div class="repl-card" style="grid-column:1/-1;display:flex">${logsBtn}</div>` : ''}
       </div>`;
   }
   const ioOk  = r.io_running  === 'Yes';
@@ -424,6 +428,7 @@ function renderRepl(r) {
       <div class="repl-card"><div class="repl-card-label">Lag</div><div class="repl-card-value" style="color:${lagColor}">${lag!==null?lag+'s':'—'}</div></div>
       <div class="repl-card"><div class="repl-card-label">Fonte</div><div style="font-size:12px;color:var(--muted)">${r.source_host||'—'}${r.source_port?':'+r.source_port:''}</div></div>
       ${err ? `<div class="repl-card" style="grid-column:1/-1"><div class="repl-card-label">Erro</div><div style="font-size:12px;color:var(--danger)">${err}</div></div>` : ''}
+      <div class="repl-card" style="grid-column:1/-1;display:flex">${logsBtn}</div>
     </div>`;
 }
 
@@ -578,7 +583,7 @@ function renderServer(srv) {
       </div>
       <div class="server-body" id="${sid}-body">
         ${renderTopology(d)}
-        ${renderRepl(d.base_repl)}
+        ${renderRepl(d.base_repl, srv.url)}
         <div class="slot-grid">${cards}</div>
       </div>
     </div>`;
